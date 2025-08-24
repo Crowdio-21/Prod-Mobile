@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">CrowdCompute</string>
+    <string name="title_dashboard">Dashboard</string>
+    <string name="title_jobs">Jobs</string>
+    <string name="title_workers">Workers</string>
+    <string name="title_activity">Activity</string>
+    <string name="loading">Loading…</string>
+    <string name="error_loading_data">Error loading data</string>
+    <string name="retry">Retry</string>
+    <string name="refresh">Refresh</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="total_jobs">Total Jobs</string>
+    <string name="total_tasks">Total Tasks</string>
+    <string name="total_workers">Total Workers</string>
+    <string name="active_jobs">Active Jobs</string>
+    <string name="completed_jobs">Completed Jobs</string>
+    <string name="connected_workers">Connected Workers</string>
+    <string name="available_workers">Available Workers</string>
+    <string name="connected_clients">Connected Clients</string>
+    <string name="status">Status</string>
+    <string name="created_at">Created At</string>
+    <string name="worker_id">Worker ID</string>
+    <string name="job_id">Job ID</string>
+    <string name="task_id">Task ID</string>
+    <string name="execution_time">Execution Time</string>
+    <string name="tasks_completed">Tasks Completed</string>
+    <string name="tasks_failed">Tasks Failed</string>
+    <string name="title_worker_control">Worker</string>
+</resources>
