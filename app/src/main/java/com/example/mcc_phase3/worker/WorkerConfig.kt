@@ -1,5 +1,7 @@
 package com.example.mcc_phase3.worker
 
+import com.example.mcc_phase3.data.ConfigManager
+
 /**
  * Configuration for the Mobile Worker Service
  *
@@ -39,17 +41,22 @@ object WorkerConfig {
     // ===== NETWORK CONFIGURATION =====
 
     /**
-     * Foreman WebSocket URL
-     * Update this to match your foreman's IP address
+     * Get Foreman WebSocket URL from ConfigManager
+     * This is now dynamically configured by the user
      */
-    // WebSocket URL for foreman connection
-    const val FOREMAN_URL = "ws://10.10.29.63:9000"
+    fun getForemanURL(context: android.content.Context): String {
+        return ConfigManager.getInstance(context).getForemanURL()
+    }
 
     /**
-     * Python Worker Service URL (for task forwarding)
-     * This should point to a Python worker service running on your network
+     * Get Statistics Service URL from ConfigManager
+     * This is now dynamically configured by the user
      */
-    const val PYTHON_SERVICE_URL = "http://192.168.8.101:8001"
+    fun getStatServiceURL(context: android.content.Context): String {
+        return ConfigManager.getInstance(context).getStatServiceURL()
+    }
+
+
 
     // ===== WORKER IDENTITY =====
 
@@ -170,12 +177,13 @@ object WorkerConfig {
     /**
      * Get configuration summary for logging
      */
-    fun getConfigSummary(): String {
+    fun getConfigSummary(context: android.content.Context): String {
         return """
             Mobile Worker Configuration:
             - Execution Mode: ${getExecutionMode()}
             - Worker ID: $WORKER_ID
-            - Foreman URL: $FOREMAN_URL
+            - Foreman URL: ${getForemanURL(context)}
+            - Statistics Service URL: ${getStatServiceURL(context)}
             - Max Concurrent Tasks: $MAX_CONCURRENT_TASKS
             - Heartbeat Interval: ${HEARTBEAT_INTERVAL}s
             - Task Timeout: ${TASK_TIMEOUT}ms

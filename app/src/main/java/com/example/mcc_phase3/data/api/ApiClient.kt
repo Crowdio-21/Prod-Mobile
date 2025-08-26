@@ -1,6 +1,8 @@
 package com.example.mcc_phase3.data.api
 
+import android.content.Context
 import android.util.Log
+import com.example.mcc_phase3.data.ConfigManager
 import com.google.gson.FieldNamingPolicy
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
@@ -12,11 +14,10 @@ import java.util.concurrent.TimeUnit
 
 object ApiClient {
     private const val TAG = "ApiClient"
-    private const val BASE_URL = "http://192.168.8.101:8000" // For Android emulator to connect to localhost
     
-    init {
+    fun initialize(context: Context) {
         Log.d(TAG, "=== ApiClient Initialization ===")
-        Log.d(TAG, "BASE_URL: $BASE_URL")
+        Log.d(TAG, "BASE_URL: ${getBaseUrl(context)}")
         Log.d(TAG, "Setting up HTTP client with timeouts and logging")
     }
     
@@ -40,22 +41,33 @@ object ApiClient {
             Log.d(TAG, "OkHttpClient configured: connect=15s, read=15s, write=15s")
         }
     
-    private val retrofit = Retrofit.Builder()
-        .baseUrl(BASE_URL)
-        .client(okHttpClient)
-        .addConverterFactory(GsonConverterFactory.create(gson))
-        .build()
-        .also {
-            Log.d(TAG, "Retrofit instance created successfully for: $BASE_URL")
-        }
+    private var retrofit: Retrofit? = null
+    private var apiService: ApiService? = null
     
-    val apiService: ApiService = retrofit.create(ApiService::class.java).also {
-        Log.d(TAG, "ApiService instance created successfully")
-        Log.d(TAG, "=== ApiClient Initialization Complete ===")
+    private fun createRetrofit(context: Context): Retrofit {
+        return Retrofit.Builder()
+            .baseUrl(getBaseUrl(context))
+            .client(okHttpClient)
+            .addConverterFactory(GsonConverterFactory.create(gson))
+            .build()
+            .also {
+                Log.d(TAG, "Retrofit instance created successfully for: ${getBaseUrl(context)}")
+            }
     }
     
-    fun updateBaseUrl(newBaseUrl: String) {
-        Log.d(TAG, "updateBaseUrl() called: changing from $BASE_URL to $newBaseUrl")
+    fun getApiService(context: Context): ApiService {
+        if (apiService == null) {
+            retrofit = createRetrofit(context)
+            apiService = retrofit!!.create(ApiService::class.java).also {
+                Log.d(TAG, "ApiService instance created successfully")
+                Log.d(TAG, "=== ApiClient Initialization Complete ===")
+            }
+        }
+        return apiService!!
+    }
+    
+    fun updateBaseUrl(context: Context, newBaseUrl: String) {
+        Log.d(TAG, "updateBaseUrl() called: changing from ${getBaseUrl(context)} to $newBaseUrl")
         // This allows dynamic URL updates for different network configurations
         val newRetrofit = Retrofit.Builder()
             .baseUrl(newBaseUrl)
@@ -63,17 +75,19 @@ object ApiClient {
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
         
-        Log.w(TAG, "updateBaseUrl() - Note: Service instance not updated, need to recreate ApiService")
-        // Note: In a real app, you'd want to recreate the service or use a different approach
+        retrofit = newRetrofit
+        apiService = retrofit!!.create(ApiService::class.java)
+        Log.d(TAG, "updateBaseUrl() - ApiService recreated with new URL")
     }
     
-    fun getBaseUrl(): String {
-        Log.d(TAG, "getBaseUrl() called, returning: $BASE_URL")
-        return BASE_URL
+    fun getBaseUrl(context: Context): String {
+        val baseUrl = ConfigManager.getInstance(context).getStatServiceURL()
+        Log.d(TAG, "getBaseUrl() called, returning: $baseUrl")
+        return baseUrl
     }
     
-    fun logApiCall(endpoint: String, method: String = "GET") {
-        Log.d(TAG, "🌐 API Call: $method $BASE_URL$endpoint")
+    fun logApiCall(context: Context, endpoint: String, method: String = "GET") {
+        Log.d(TAG, "🌐 API Call: $method ${getBaseUrl(context)}$endpoint")
     }
     
     fun logApiSuccess(endpoint: String, responseCode: Int, responseSize: Int = -1) {
@@ -81,17 +95,17 @@ object ApiClient {
         Log.d(TAG, "✅ API Success: $endpoint -> HTTP $responseCode$sizeInfo")
     }
     
-    fun logApiError(endpoint: String, error: Throwable) {
+    fun logApiError(context: Context, endpoint: String, error: Throwable) {
         Log.e(TAG, "❌ API Error: $endpoint", error)
         when {
             error.message?.contains("ConnectException") == true -> {
-                Log.e(TAG, "🔌 Connection Error: Server might be down or unreachable at $BASE_URL")
+                Log.e(TAG, "🔌 Connection Error: Server might be down or unreachable at ${getBaseUrl(context)}")
             }
             error.message?.contains("SocketTimeoutException") == true -> {
                 Log.e(TAG, "⏰ Timeout Error: Request took longer than expected")
             }
             error.message?.contains("UnknownHostException") == true -> {
-                Log.e(TAG, "🌐 Network Error: Cannot resolve host $BASE_URL")
+                Log.e(TAG, "🌐 Network Error: Cannot resolve host ${getBaseUrl(context)}")
             }
         }
     }

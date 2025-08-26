@@ -1,20 +1,21 @@
 package com.example.mcc_phase3.ui.mvi
 
+import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.mcc_phase3.data.models.*
 import com.example.mcc_phase3.data.repository.CrowdComputeRepository
 import com.example.mcc_phase3.data.websocket.WebSocketManager
 import kotlinx.coroutines.launch
 
-class MainViewModel : ViewModel() {
+class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = CrowdComputeRepository()
+    private val repository = CrowdComputeRepository(application)
 
     private val _state = MutableLiveData<MainState>(MainState.Loading)
     val state: LiveData<MainState> = _state

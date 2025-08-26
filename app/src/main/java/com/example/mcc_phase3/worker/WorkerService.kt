@@ -38,7 +38,7 @@ class WorkerService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "=== WorkerService Created ===")
-        Log.d(TAG, WorkerConfig.getConfigSummary())
+        Log.d(TAG, WorkerConfig.getConfigSummary(this@WorkerService))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -97,8 +97,9 @@ class WorkerService : Service() {
         }
 
         webSocketManager.addListener(listener)
-        Log.d(TAG, "🔌 Attempting to connect to: ${WorkerConfig.FOREMAN_URL}")
-        webSocketManager.connect(WorkerConfig.FOREMAN_URL)
+        val foremanUrl = WorkerConfig.getForemanURL(this@WorkerService)
+        Log.d(TAG, "🔌 Attempting to connect to: $foremanUrl")
+        webSocketManager.connect(foremanUrl)
     }
 
     private fun handleIncomingMessage(message: String) {

@@ -1,15 +1,19 @@
 package com.example.mcc_phase3.ui.fragments
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import androidx.fragment.app.Fragment
 import com.example.mcc_phase3.databinding.FragmentWorkerControlBinding
 import com.example.mcc_phase3.worker.WorkerService
 import com.example.mcc_phase3.worker.WorkerConfig
+import com.example.mcc_phase3.data.ConfigManager
+import com.example.mcc_phase3.R
 import kotlinx.coroutines.*
 
 class WorkerControlFragment : Fragment() {
@@ -55,6 +59,11 @@ class WorkerControlFragment : Fragment() {
         binding.refreshStatusButton.setOnClickListener {
             Log.d(TAG, "🔄 Refresh status button clicked")
             updateWorkerStatus()
+        }
+        
+        binding.configureForemanButton.setOnClickListener {
+            Log.d(TAG, "⚙️ Configure foreman button clicked")
+            showForemanConfigurationDialog()
         }
     }
     
@@ -113,10 +122,12 @@ class WorkerControlFragment : Fragment() {
         Log.d(TAG, "updateWorkerStatus: Updating worker status display")
         
         try {
+            val configManager = ConfigManager.getInstance(requireContext())
+            
             // For now, we'll show basic status
             // In a real implementation, you'd get this from the service via binding
             binding.workerIdText.text = "Worker ID: ${WorkerConfig.WORKER_ID}"
-            binding.foremanUrlText.text = "Foreman: ${WorkerConfig.FOREMAN_URL}"
+            binding.foremanUrlText.text = "Foreman: ${configManager.getForemanURL()}"
             
             // Update connection status
             val isConnected = true // This would come from the service
@@ -149,5 +160,81 @@ class WorkerControlFragment : Fragment() {
         updateScope.cancel()
         _binding = null
         super.onDestroyView()
+    }
+    
+    private fun showForemanConfigurationDialog() {
+        val configManager = ConfigManager.getInstance(requireContext())
+        val currentIP = configManager.getForemanIP()
+        val currentPort = configManager.getForemanPort()
+        
+        val dialogView = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_foreman_config, null)
+        val ipInput = dialogView.findViewById(R.id.ip_input) as EditText
+        val portInput = dialogView.findViewById(R.id.port_input) as EditText
+        
+        // Set current values
+        ipInput.setText(currentIP)
+        portInput.setText(currentPort.toString())
+        
+        val dialog = AlertDialog.Builder(requireContext())
+            .setView(dialogView)
+            .setPositiveButton("Save") { _, _ ->
+                val newIP = ipInput.text.toString().trim()
+                val newPortStr = portInput.text.toString().trim()
+                
+                if (validateAndSaveConfiguration(newIP, newPortStr)) {
+                    Log.d(TAG, "Foreman configuration updated: $newIP:$newPortStr")
+                    updateWorkerStatus() // Refresh the display
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+        
+        dialog.show()
+    }
+    
+    private fun validateAndSaveConfiguration(ip: String, portStr: String): Boolean {
+        val configManager = ConfigManager.getInstance(requireContext())
+        
+        if (ip.isBlank()) {
+            showError("IP address cannot be empty")
+            return false
+        }
+        
+        if (!configManager.isValidIPAddress(ip)) {
+            showError("Invalid IP address format. Please enter a valid IPv4 address (e.g., 192.168.1.100)")
+            return false
+        }
+        
+        val port = portStr.toIntOrNull()
+        if (port == null || !configManager.isValidPort(port)) {
+            showError("Invalid port number. Please enter a number between 1 and 65535")
+            return false
+        }
+        
+        // Save the configuration
+        configManager.setForemanIP(ip)
+        configManager.setForemanPort(port)
+        Log.d(TAG, "Foreman configuration saved: $ip:$port")
+        
+        // Show success message
+        showSuccess("Foreman configuration updated successfully!\nIP: $ip\nPort: $port")
+        
+        return true
+    }
+    
+    private fun showError(message: String) {
+        AlertDialog.Builder(requireContext())
+            .setTitle("Configuration Error")
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+    
+    private fun showSuccess(message: String) {
+        AlertDialog.Builder(requireContext())
+            .setTitle("Configuration Success")
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show()
     }
 }

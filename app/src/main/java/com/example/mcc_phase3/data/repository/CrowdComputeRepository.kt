@@ -10,8 +10,8 @@ import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import com.example.mcc_phase3.data.websocket.WebSocketManager.WebSocketListener
 
-class CrowdComputeRepository {
-    private val apiService: ApiService = ApiClient.apiService
+class CrowdComputeRepository(private val context: android.content.Context) {
+    private val apiService: ApiService = ApiClient.getApiService(context)
     private val webSocketManager = WebSocketManager.getInstance() // ✅ Use singleton instance
 
     companion object {
@@ -22,12 +22,12 @@ class CrowdComputeRepository {
         Log.d(TAG, "=== CrowdComputeRepository Initialized ===")
         Log.d(TAG, "ApiService: ${apiService.javaClass.simpleName}")
         Log.d(TAG, "WebSocketManager: ${webSocketManager.javaClass.simpleName}")
-        Log.d(TAG, "Base URL: ${ApiClient.getBaseUrl()}")
+        Log.d(TAG, "Base URL: ${ApiClient.getBaseUrl(context)}")
     }
 
     suspend fun getStats(): Result<Stats> = withContext(Dispatchers.IO) {
         Log.d(TAG, "📊 getStats() called")
-        ApiClient.logApiCall("/api/stats")
+        ApiClient.logApiCall(context, "/api/stats")
 
         try {
             val startTime = System.currentTimeMillis()
@@ -41,14 +41,14 @@ class CrowdComputeRepository {
             Result.success(stats)
         } catch (e: Exception) {
             Log.e(TAG, "❌ getStats() failed", e)
-            ApiClient.logApiError("/api/stats", e)
+            ApiClient.logApiError(context, "/api/stats", e)
             Result.failure(e)
         }
     }
 
     suspend fun getJobs(skip: Int = 0, limit: Int = 100): Result<List<Job>> = withContext(Dispatchers.IO) {
         Log.d(TAG, "💼 getJobs() called with skip=$skip, limit=$limit")
-        ApiClient.logApiCall("/api/jobs?skip=$skip&limit=$limit")
+        ApiClient.logApiCall(context, "/api/jobs?skip=$skip&limit=$limit")
 
         try {
             val startTime = System.currentTimeMillis()
@@ -65,14 +65,14 @@ class CrowdComputeRepository {
             Result.success(jobs)
         } catch (e: Exception) {
             Log.e(TAG, "❌ getJobs() failed", e)
-            ApiClient.logApiError("/api/jobs", e)
+            ApiClient.logApiError(context, "/api/jobs", e)
             Result.failure(e)
         }
     }
 
     suspend fun getJob(jobId: String): Result<Job> = withContext(Dispatchers.IO) {
         Log.d(TAG, "💼 getJob() called for jobId=$jobId")
-        ApiClient.logApiCall("/api/jobs/$jobId")
+        ApiClient.logApiCall(context, "/api/jobs/$jobId")
 
         try {
             val startTime = System.currentTimeMillis()
@@ -86,14 +86,14 @@ class CrowdComputeRepository {
             Result.success(job)
         } catch (e: Exception) {
             Log.e(TAG, "❌ getJob($jobId) failed", e)
-            ApiClient.logApiError("/api/jobs/$jobId", e)
+            ApiClient.logApiError(context, "/api/jobs/$jobId", e)
             Result.failure(e)
         }
     }
 
     suspend fun getWorkers(): Result<List<Worker>> = withContext(Dispatchers.IO) {
         Log.d(TAG, "👷 getWorkers() called")
-        ApiClient.logApiCall("/api/workers")
+        ApiClient.logApiCall(context, "/api/workers")
 
         try {
             val startTime = System.currentTimeMillis()
@@ -115,14 +115,14 @@ class CrowdComputeRepository {
             Result.success(workers)
         } catch (e: Exception) {
             Log.e(TAG, "❌ getWorkers() failed", e)
-            ApiClient.logApiError("/api/workers", e)
+            ApiClient.logApiError(context, "/api/workers", e)
             Result.failure(e)
         }
     }
 
     suspend fun getWebsocketStats(): Result<WebsocketStats> = withContext(Dispatchers.IO) {
         Log.d(TAG, "🔌 getWebsocketStats() called")
-        ApiClient.logApiCall("/api/websocket-stats")
+        ApiClient.logApiCall(context, "/api/websocket-stats")
 
         try {
             val startTime = System.currentTimeMillis()
@@ -136,7 +136,7 @@ class CrowdComputeRepository {
             Result.success(stats)
         } catch (e: Exception) {
             Log.e(TAG, "❌ getWebsocketStats() failed", e)
-            ApiClient.logApiError("/api/websocket-stats", e)
+            ApiClient.logApiError(context, "/api/websocket-stats", e)
             Result.failure(e)
         }
     }
@@ -174,7 +174,7 @@ class CrowdComputeRepository {
 
     fun getConnectionSummary(): String {
         val wsConnected = webSocketManager.isConnected()
-        val summary = "Repository - API: ${ApiClient.getBaseUrl()}, WebSocket: ${if (wsConnected) "Connected" else "Disconnected"}"
+        val summary = "Repository - API: ${ApiClient.getBaseUrl(context)}, WebSocket: ${if (wsConnected) "Connected" else "Disconnected"}"
         Log.d(TAG, "📋 getConnectionSummary(): $summary")
         return summary
     }

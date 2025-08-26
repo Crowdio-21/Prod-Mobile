@@ -68,6 +68,14 @@
                     android:layout_marginTop="8dp"
                     android:text="Refresh Status" />
 
+                <Button
+                    android:id="@+id/configure_foreman_button"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/configure_foreman"
+                    android:backgroundTint="@android:color/holo_blue_dark" />
+
             </LinearLayout>
 
         </com.google.android.material.card.MaterialCardView>
