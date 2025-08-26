@@ -24,6 +24,12 @@
             </intent-filter>
         </activity>
         
+        <activity
+            android:name=".ui.ChaquopyTestActivity"
+            android:exported="false"
+            android:label="Python Test"
+            android:theme="@style/Theme.MCCPhase3" />
+        
         <service
             android:name=".worker.WorkerService"
             android:enabled="true"
