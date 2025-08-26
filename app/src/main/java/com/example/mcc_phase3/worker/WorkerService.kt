@@ -12,6 +12,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.*
 import kotlin.random.Random
+import android.content.Context
+import kotlinx.coroutines.runBlocking
 
 class WorkerService : Service() {
 
@@ -24,7 +26,10 @@ class WorkerService : Service() {
     private val startTime = System.currentTimeMillis()
 
     // Task executor for computational tasks
-    private val taskExecutor = MobileTaskExecutor()
+    private val taskExecutor = MobileTaskExecutor(this)
+    
+    // Python executor for Python code execution
+    private val pythonExecutor = PythonExecutor(this)
 
     // Track current worker status
     private var currentStatus = "offline"
@@ -192,7 +197,12 @@ class WorkerService : Service() {
     private suspend fun executeRealTask(taskData: JSONObject): Any {
         return withContext(Dispatchers.Default) {
             try {
-                // Extract task information
+                // Check if this is a Python task with serialized code
+                if (taskData.has("python_code") || taskData.has("serialized_code")) {
+                    return@withContext executePythonTask(taskData)
+                }
+
+                // Extract task information for regular tasks
                 val functionName = extractFunctionName(taskData)
                 val taskArgs = extractTaskArgs(taskData)
 
@@ -215,7 +225,7 @@ class WorkerService : Service() {
             taskData.has("function_name") -> taskData.getString("function_name")
             taskData.has("func_name") -> taskData.getString("func_name")
             taskData.has("task_type") -> taskData.getString("task_type")
-            taskData.has("func_pickle") -> "pickled_function" // For Python pickled functions
+            taskData.has("func_code") -> "pickled_function" // For Python pickled functions
             else -> "unknown_function"
         }
     }
@@ -258,6 +268,49 @@ class WorkerService : Service() {
         }
     }
 
+    /**
+     * Execute Python task with serialized code and arguments
+     */
+    private suspend fun executePythonTask(taskData: JSONObject): Any {
+        return try {
+            Log.d(TAG, "🐍 Executing Python task")
+            
+            // Check if Python execution is enabled
+            if (!WorkerConfig.PYTHON_LOCAL) {
+                throw RuntimeException("Python execution is not enabled")
+            }
+
+            // Extract serialized Python code and arguments
+            val serializedCode = when {
+                taskData.has("python_code") -> taskData.getString("python_code")
+                taskData.has("serialized_code") -> taskData.getString("serialized_code")
+                taskData.has("code") -> taskData.getString("code")
+                else -> throw IllegalArgumentException("No Python code found in task data")
+            }
+
+            val serializedArgs = when {
+                taskData.has("python_args") -> taskData.getString("python_args")
+                taskData.has("serialized_args") -> taskData.getString("serialized_args")
+                taskData.has("args") -> taskData.getString("args")
+                taskData.has("arguments") -> taskData.getString("arguments")
+                else -> ""
+            }
+
+            Log.d(TAG, "🐍 Python code length: ${serializedCode.length}")
+            Log.d(TAG, "🐍 Python args length: ${serializedArgs.length}")
+
+            // Execute the Python code using Chaquopy
+            val result = pythonExecutor.executePythonCode(serializedCode, serializedArgs)
+            
+            Log.d(TAG, "✅ Python task execution completed")
+            result
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Python task execution failed", e)
+            throw RuntimeException("Python task execution failed: ${e.message}")
+        }
+    }
+
     private fun handleTaskCancel(json: JSONObject) {
         try {
             val data = json.getJSONObject("data")
@@ -290,11 +343,16 @@ class WorkerService : Service() {
                 put("max_concurrent_tasks", WorkerConfig.MAX_CONCURRENT_TASKS)
                 put("status", currentStatus)
                 put("platform", "android")
+                put("python_version", pythonExecutor.getPythonVersion())
                 put("execution_modes", JSONArray().apply {
                     put("mathematical_computation")
                     put("data_processing")
                     put("string_manipulation")
                     put("statistical_analysis")
+                    if (WorkerConfig.PYTHON_LOCAL) {
+                        put("python_execution")
+                        put("chaquopy_runtime")
+                    }
                 })
             })
         }
@@ -409,7 +467,7 @@ class WorkerService : Service() {
 /**
  * Task executor for mobile computational tasks
  */
-class MobileTaskExecutor {
+class MobileTaskExecutor(private val context: Context) {
 
     companion object {
         private const val TAG = "MobileTaskExecutor"
@@ -626,10 +684,29 @@ class MobileTaskExecutor {
         return array.indexOf(target)
     }
 
-    // Handle Python pickled functions (placeholder)
-    private fun handlePickledFunction(args: List<Any>): String {
-        Log.w(TAG, "⚠️ Python pickled function not supported on Android")
-        return "Error: Python pickled functions not supported on mobile platform"
+    // Handle Python pickled functions using Chaquopy
+    private fun handlePickledFunction(args: List<Any>): Any {
+        Log.d(TAG, "🐍 Handling Python pickled function with Chaquopy")
+        
+        // This should be handled by the PythonExecutor in the main task processing
+        // This is a fallback for legacy task types
+        return try {
+            if (args.isNotEmpty() && args[0] is String) {
+                val serializedCode = args[0] as String
+                val serializedArgs = if (args.size > 1) args[1] as String else ""
+                
+                // Use a synchronous call for this legacy method
+                runBlocking {
+                    val pythonExecutor = PythonExecutor(context)
+                    pythonExecutor.executePythonCode(serializedCode, serializedArgs)
+                }
+            } else {
+                "Error: Invalid pickled function arguments"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error handling pickled function", e)
+            "Error: Failed to execute pickled function - ${e.message}"
+        }
     }
 
     // Generic function handler

@@ -6,9 +6,9 @@ import com.example.mcc_phase3.data.ConfigManager
  * Configuration for the Mobile Worker Service
  *
  * This file allows you to easily configure how the mobile worker handles tasks:
- * 1. SIMULATION_MODE: Simulates task execution (default, safe)
+ * 1. SIMULATION_MODE: Simulates task execution (safe, for testing)
  * 2. PYTHON_FORWARDING: Forwards tasks to a Python worker service
- * 3. PYTHON_LOCAL: Executes Python tasks locally (requires Python runtime)
+ * 3. PYTHON_LOCAL: Executes Python tasks locally using Chaquopy (default)
  */
 object WorkerConfig {
 
@@ -20,7 +20,7 @@ object WorkerConfig {
      * - Fast: Immediate response
      * - Good for: Testing, development, safe environments
      */
-    const val SIMULATION_MODE = true
+    const val SIMULATION_MODE = false
 
     /**
      * PYTHON_FORWARDING: Forwards tasks to Python worker service
@@ -31,12 +31,12 @@ object WorkerConfig {
     const val PYTHON_FORWARDING = false
 
     /**
-     * PYTHON_LOCAL: Executes Python tasks locally
-     * - Advanced: Requires Python runtime (Chaquopy, BeeWare, etc.)
+     * PYTHON_LOCAL: Executes Python tasks locally using Chaquopy
+     * - Advanced: Requires Python runtime (Chaquopy)
      * - Powerful: Full Python execution capability
-     * - Good for: Advanced mobile computing
+     * - Good for: Advanced mobile computing (default)
      */
-    const val PYTHON_LOCAL = false
+    const val PYTHON_LOCAL = true
 
     // ===== NETWORK CONFIGURATION =====
 
@@ -56,8 +56,6 @@ object WorkerConfig {
         return ConfigManager.getInstance(context).getStatServiceURL()
     }
 
-
-
     // ===== WORKER IDENTITY =====
 
     /**
@@ -73,11 +71,16 @@ object WorkerConfig {
      */
     val CAPABILITIES = listOf(
         "mobile_optimized",
-        "task_simulation",
-        "network_forwarding"
+        "python_execution",
+        "chaquopy_runtime",
+        "numpy_support",
+        "pandas_support",
+        "scipy_support",
+        "matplotlib_support"
     ).apply {
-        if (PYTHON_LOCAL) plus("python_execution")
+        if (PYTHON_LOCAL) plus("python_local_execution")
         if (PYTHON_FORWARDING) plus("python_forwarding")
+        if (SIMULATION_MODE) plus("task_simulation")
     }
 
     // ===== PERFORMANCE SETTINGS =====
@@ -160,7 +163,7 @@ object WorkerConfig {
      */
     fun getExecutionMode(): String {
         return when {
-            PYTHON_LOCAL -> "Python Local Execution"
+            PYTHON_LOCAL -> "Python Local Execution (Chaquopy)"
             PYTHON_FORWARDING -> "Python Task Forwarding"
             SIMULATION_MODE -> "Task Simulation"
             else -> "Unknown Mode"
