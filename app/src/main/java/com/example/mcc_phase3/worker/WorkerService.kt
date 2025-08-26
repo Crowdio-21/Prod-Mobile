@@ -97,11 +97,13 @@ class WorkerService : Service() {
         }
 
         webSocketManager.addListener(listener)
+        Log.d(TAG, "🔌 Attempting to connect to: ${WorkerConfig.FOREMAN_URL}")
         webSocketManager.connect(WorkerConfig.FOREMAN_URL)
     }
 
     private fun handleIncomingMessage(message: String) {
         try {
+            Log.d(TAG, "📨 Raw message received: $message")
             val json = JSONObject(message)
             val type = json.optString("type", "")
 
@@ -120,11 +122,13 @@ class WorkerService : Service() {
 
     private fun handleTaskAssignment(json: JSONObject) {
         try {
+            Log.d(TAG, "📋 Processing task assignment: ${json.toString()}")
             val data = json.getJSONObject("data")
             val taskId = data.getString("task_id")
             val jobId = json.optString("job_id", "")
 
             Log.d(TAG, "📋 Task assigned: $taskId (Job: $jobId)")
+            Log.d(TAG, "📋 Task data: ${data.toString()}")
 
             if (activeTasks.size >= WorkerConfig.MAX_CONCURRENT_TASKS) {
                 Log.w(TAG, "⚠️ Worker at capacity, rejecting task $taskId")
@@ -293,17 +297,16 @@ class WorkerService : Service() {
                 })
             })
         }
-        webSocketManager.sendMessage(msg.toString())
+        val messageStr = msg.toString()
+        webSocketManager.sendMessage(messageStr)
         Log.d(TAG, "📤 Sent worker registration")
+        Log.d(TAG, "📤 Registration message: $messageStr")
     }
 
     private fun sendPongResponse() {
         val msg = JSONObject().apply {
             put("type", "pong")
-            put("data", JSONObject().apply {
-                put("worker_id", WorkerConfig.WORKER_ID)
-                put("timestamp", System.currentTimeMillis())
-            })
+            put("data", JSONObject())
         }
         webSocketManager.sendMessage(msg.toString())
     }
@@ -311,31 +314,31 @@ class WorkerService : Service() {
     private fun sendTaskResult(taskId: String, jobId: String, result: Any) {
         val msg = JSONObject().apply {
             put("type", "task_result")
-            put("job_id", jobId)
             put("data", JSONObject().apply {
-                put("task_id", taskId)
                 put("result", result)
-                put("worker_id", WorkerConfig.WORKER_ID)
-                put("timestamp", System.currentTimeMillis())
+                put("task_id", taskId)
             })
+            put("job_id", jobId)
         }
-        webSocketManager.sendMessage(msg.toString())
+        val messageStr = msg.toString()
+        webSocketManager.sendMessage(messageStr)
         Log.d(TAG, "📤 Task result sent: $taskId")
+        Log.d(TAG, "📤 Message content: $messageStr")
     }
 
     private fun sendTaskError(taskId: String, jobId: String, error: String) {
         val msg = JSONObject().apply {
             put("type", "task_error")
-            put("job_id", jobId)
             put("data", JSONObject().apply {
-                put("task_id", taskId)
                 put("error", error)
-                put("worker_id", WorkerConfig.WORKER_ID)
-                put("timestamp", System.currentTimeMillis())
+                put("task_id", taskId)
             })
+            put("job_id", jobId)
         }
-        webSocketManager.sendMessage(msg.toString())
+        val messageStr = msg.toString()
+        webSocketManager.sendMessage(messageStr)
         Log.d(TAG, "📤 Task error sent: $taskId")
+        Log.d(TAG, "📤 Message content: $messageStr")
     }
 
     private fun sendTaskRejection(taskId: String, reason: String) {
@@ -345,7 +348,6 @@ class WorkerService : Service() {
                 put("worker_id", WorkerConfig.WORKER_ID)
                 put("task_id", taskId)
                 put("reason", reason)
-                put("timestamp", System.currentTimeMillis())
             })
         }
         webSocketManager.sendMessage(msg.toString())
@@ -358,7 +360,6 @@ class WorkerService : Service() {
             put("data", JSONObject().apply {
                 put("worker_id", WorkerConfig.WORKER_ID)
                 put("task_id", taskId)
-                put("timestamp", System.currentTimeMillis())
             })
         }
         webSocketManager.sendMessage(msg.toString())
@@ -385,7 +386,6 @@ class WorkerService : Service() {
                 put("tasks_completed", tasksCompleted.get())
                 put("tasks_failed", tasksFailed.get())
                 put("uptime", System.currentTimeMillis() - startTime)
-                put("timestamp", System.currentTimeMillis())
             })
         }
         webSocketManager.sendMessage(msg.toString())

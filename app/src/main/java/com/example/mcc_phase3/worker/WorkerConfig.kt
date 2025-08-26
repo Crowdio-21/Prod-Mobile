@@ -43,7 +43,7 @@ object WorkerConfig {
      * Update this to match your foreman's IP address
      */
     // WebSocket URL for foreman connection
-    const val FOREMAN_URL = "ws://192.168.8.101:9000"
+    const val FOREMAN_URL = "ws://10.10.29.63:9000"
 
     /**
      * Python Worker Service URL (for task forwarding)
