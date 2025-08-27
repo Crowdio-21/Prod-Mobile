@@ -5,10 +5,16 @@ import com.example.mcc_phase3.data.api.ApiClient
 import com.example.mcc_phase3.data.api.ApiService
 import com.example.mcc_phase3.data.models.*
 import com.example.mcc_phase3.data.websocket.WebSocketManager
+import com.example.mcc_phase3.data.ConfigManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import retrofit2.HttpException
 import com.example.mcc_phase3.data.websocket.WebSocketManager.WebSocketListener
+import java.net.SocketTimeoutException
+import java.net.ConnectException
+import java.net.UnknownHostException
+import java.io.IOException
 
 class CrowdComputeRepository(private val context: android.content.Context) {
     private val apiService: ApiService = ApiClient.getApiService(context)
@@ -16,7 +22,16 @@ class CrowdComputeRepository(private val context: android.content.Context) {
 
     companion object {
         private const val TAG = "CrowdComputeRepository"
+        private const val CIRCUIT_BREAKER_THRESHOLD = 5  // Increased from 3 to 5
+        private const val CIRCUIT_BREAKER_TIMEOUT_MS = 60000L // Increased from 30s to 60s
+        private const val CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2 // Number of successes needed to close circuit
     }
+    
+    // Circuit breaker state
+    private var failureCount = 0
+    private var successCount = 0
+    private var lastFailureTime = 0L
+    private var isCircuitOpen = false
 
     init {
         Log.d(TAG, "=== CrowdComputeRepository Initialized ===")
@@ -30,6 +45,8 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         ApiClient.logApiCall(context, "/api/stats")
 
         try {
+            checkCircuitBreaker()
+            
             val startTime = System.currentTimeMillis()
             val stats = apiService.getStats()
             val duration = System.currentTimeMillis() - startTime
@@ -37,12 +54,11 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             Log.d(TAG, "✅ getStats() successful in ${duration}ms")
             Log.d(TAG, "📊 Stats data: totalJobs=${stats.totalJobs}, totalTasks=${stats.totalTasks}, totalWorkers=${stats.totalWorkers}")
             ApiClient.logApiSuccess("/api/stats", 200)
-
+            
+            resetCircuitBreaker()
             Result.success(stats)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ getStats() failed", e)
-            ApiClient.logApiError(context, "/api/stats", e)
-            Result.failure(e)
+            handleApiError(e, "getStats")
         }
     }
 
@@ -51,6 +67,8 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         ApiClient.logApiCall(context, "/api/jobs?skip=$skip&limit=$limit")
 
         try {
+            checkCircuitBreaker()
+            
             val startTime = System.currentTimeMillis()
             val jobs = apiService.getJobs(skip, limit)
             val duration = System.currentTimeMillis() - startTime
@@ -61,13 +79,86 @@ class CrowdComputeRepository(private val context: android.content.Context) {
                 Log.v(TAG, "💼 Job[$index]: id=${job.id}, status=${job.status}, progress=${job.completedTasks}/${job.totalTasks}")
             }
             ApiClient.logApiSuccess("/api/jobs", 200, jobs.size)
-
+            
+            resetCircuitBreaker()
             Result.success(jobs)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ getJobs() failed", e)
-            ApiClient.logApiError(context, "/api/jobs", e)
-            Result.failure(e)
+            handleApiError(e, "getJobs")
         }
+    }
+    
+    private fun checkNetworkConnectivity() {
+        try {
+            val configManager = ConfigManager.getInstance(context)
+            val foremanUrl = configManager.getForemanHttpURL()
+            Log.d(TAG, "🌐 Checking connectivity to: $foremanUrl")
+            
+            // Try a simple ping test
+            val runtime = Runtime.getRuntime()
+            val process = runtime.exec("ping -c 1 ${configManager.getForemanIP()}")
+            val exitCode = process.waitFor()
+            
+            if (exitCode == 0) {
+                Log.d(TAG, "✅ Network connectivity OK")
+            } else {
+                Log.w(TAG, "⚠️ Network connectivity issue - ping failed")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Could not check network connectivity: ${e.message}")
+        }
+    }
+    
+    private fun checkCircuitBreaker() {
+        if (isCircuitOpen) {
+            val timeSinceLastFailure = System.currentTimeMillis() - lastFailureTime
+            if (timeSinceLastFailure < CIRCUIT_BREAKER_TIMEOUT_MS) {
+                Log.w(TAG, "🚫 Circuit breaker is OPEN, request blocked (${timeSinceLastFailure}ms since last failure)")
+                throw IOException("Circuit breaker is open - too many recent failures. Try again in ${(CIRCUIT_BREAKER_TIMEOUT_MS - timeSinceLastFailure) / 1000}s")
+            } else {
+                Log.d(TAG, "🔄 Circuit breaker timeout reached, attempting to close")
+                isCircuitOpen = false
+                failureCount = 0
+                successCount = 0
+            }
+        }
+    }
+    
+    private fun resetCircuitBreaker() {
+        successCount++
+        if (successCount >= CIRCUIT_BREAKER_SUCCESS_THRESHOLD) {
+            Log.d(TAG, "✅ Circuit breaker reset after $successCount successful requests")
+            failureCount = 0
+            successCount = 0
+            isCircuitOpen = false
+        }
+    }
+    
+    private fun handleApiError(e: Exception, operation: String): Result<Nothing> {
+        Log.e(TAG, "❌ $operation() failed", e)
+        ApiClient.logApiError(context, "/api/$operation", e)
+        
+        // Update circuit breaker state
+        failureCount++
+        successCount = 0 // Reset success count on failure
+        lastFailureTime = System.currentTimeMillis()
+        
+        if (failureCount >= CIRCUIT_BREAKER_THRESHOLD) {
+            isCircuitOpen = true
+            Log.w(TAG, "🚫 Circuit breaker opened after $failureCount failures")
+        }
+        
+        // Provide specific error messages based on exception type
+        val errorMessage = when (e) {
+            is SocketTimeoutException -> "Request timed out. Please check your network connection."
+            is ConnectException -> "Cannot connect to server. Please check if the server is running."
+            is UnknownHostException -> "Cannot resolve server address. Please check your network configuration."
+            is IOException -> "Network communication failed. Please check your internet connection."
+            is HttpException -> "Server error (${e.code()}). Please try again later."
+            else -> "An unexpected error occurred: ${e.message}"
+        }
+        
+        Log.e(TAG, "💡 Error details: $errorMessage")
+        return Result.failure(e)
     }
 
     suspend fun getJob(jobId: String): Result<Job> = withContext(Dispatchers.IO) {
@@ -75,6 +166,8 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         ApiClient.logApiCall(context, "/api/jobs/$jobId")
 
         try {
+            checkCircuitBreaker()
+            
             val startTime = System.currentTimeMillis()
             val job = apiService.getJob(jobId)
             val duration = System.currentTimeMillis() - startTime
@@ -82,12 +175,11 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             Log.d(TAG, "✅ getJob() successful in ${duration}ms")
             Log.d(TAG, "💼 Job details: id=${job.id}, status=${job.status}, progress=${job.completedTasks}/${job.totalTasks}")
             ApiClient.logApiSuccess("/api/jobs/$jobId", 200)
-
+            
+            resetCircuitBreaker()
             Result.success(job)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ getJob($jobId) failed", e)
-            ApiClient.logApiError(context, "/api/jobs/$jobId", e)
-            Result.failure(e)
+            handleApiError(e, "getJob")
         }
     }
 
@@ -96,6 +188,8 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         ApiClient.logApiCall(context, "/api/workers")
 
         try {
+            checkCircuitBreaker()
+            
             val startTime = System.currentTimeMillis()
             val workers = apiService.getWorkers()
             val duration = System.currentTimeMillis() - startTime
@@ -111,12 +205,11 @@ class CrowdComputeRepository(private val context: android.content.Context) {
                 Log.v(TAG, "👷 Worker[$index]: id=${worker.id}, status=${worker.status}, task=${worker.currentTaskId}")
             }
             ApiClient.logApiSuccess("/api/workers", 200, workers.size)
-
+            
+            resetCircuitBreaker()
             Result.success(workers)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ getWorkers() failed", e)
-            ApiClient.logApiError(context, "/api/workers", e)
-            Result.failure(e)
+            handleApiError(e, "getWorkers")
         }
     }
 
@@ -125,6 +218,8 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         ApiClient.logApiCall(context, "/api/websocket-stats")
 
         try {
+            checkCircuitBreaker()
+            
             val startTime = System.currentTimeMillis()
             val stats = apiService.getWebsocketStats()
             val duration = System.currentTimeMillis() - startTime
@@ -132,12 +227,11 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             Log.d(TAG, "✅ getWebsocketStats() successful in ${duration}ms")
             Log.d(TAG, "🔌 WebSocket stats: connected=${stats.connectedWorkers}, available=${stats.availableWorkers}")
             ApiClient.logApiSuccess("/api/websocket-stats", 200)
-
+            
+            resetCircuitBreaker()
             Result.success(stats)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ getWebsocketStats() failed", e)
-            ApiClient.logApiError(context, "/api/websocket-stats", e)
-            Result.failure(e)
+            handleApiError(e, "getWebsocketStats")
         }
     }
 
@@ -174,8 +268,27 @@ class CrowdComputeRepository(private val context: android.content.Context) {
 
     fun getConnectionSummary(): String {
         val wsConnected = webSocketManager.isConnected()
-        val summary = "Repository - API: ${ApiClient.getBaseUrl(context)}, WebSocket: ${if (wsConnected) "Connected" else "Disconnected"}"
+        val circuitStatus = if (isCircuitOpen) "OPEN" else "CLOSED"
+        val summary = "Repository - API: ${ApiClient.getBaseUrl(context)}, WebSocket: ${if (wsConnected) "Connected" else "Disconnected"}, Circuit: $circuitStatus"
         Log.d(TAG, "📋 getConnectionSummary(): $summary")
         return summary
+    }
+    
+    /**
+     * Get circuit breaker status for debugging
+     */
+    fun getCircuitBreakerStatus(): String {
+        return "Circuit Breaker: ${if (isCircuitOpen) "OPEN" else "CLOSED"}, Failures: $failureCount, Successes: $successCount, Last Failure: ${if (lastFailureTime > 0) "${System.currentTimeMillis() - lastFailureTime}ms ago" else "Never"}"
+    }
+    
+    /**
+     * Manual reset of circuit breaker for testing/debugging
+     */
+    fun resetCircuitBreakerManually() {
+        Log.d(TAG, "🔧 Manual circuit breaker reset")
+        failureCount = 0
+        successCount = 0
+        isCircuitOpen = false
+        lastFailureTime = 0L
     }
 }
