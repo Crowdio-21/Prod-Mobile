@@ -11,14 +11,28 @@ import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.ConnectException
+import java.net.UnknownHostException
 
 object ApiClient {
     private const val TAG = "ApiClient"
     
+    // Timeout configuration - increased for better network resilience
+    private const val CONNECT_TIMEOUT_SECONDS = 30L
+    private const val READ_TIMEOUT_SECONDS = 60L
+    private const val WRITE_TIMEOUT_SECONDS = 30L
+    
+    // Retry configuration
+    private const val MAX_RETRIES = 3
+    private const val RETRY_DELAY_MS = 1000L
+    
     fun initialize(context: Context) {
         Log.d(TAG, "=== ApiClient Initialization ===")
         Log.d(TAG, "BASE_URL: ${getBaseUrl(context)}")
-        Log.d(TAG, "Setting up HTTP client with timeouts and logging")
+        Log.d(TAG, "Setting up HTTP client with enhanced timeouts and retry mechanism")
+        Log.d(TAG, "Timeouts: connect=${CONNECT_TIMEOUT_SECONDS}s, read=${READ_TIMEOUT_SECONDS}s, write=${WRITE_TIMEOUT_SECONDS}s")
     }
     
     private val gson = GsonBuilder()
@@ -33,12 +47,14 @@ object ApiClient {
             level = HttpLoggingInterceptor.Level.BODY
             Log.d(TAG, "HTTP logging interceptor set to BODY level")
         })
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .addInterceptor(RetryInterceptor())
+        .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .connectionPool(okhttp3.ConnectionPool(5, 5, TimeUnit.MINUTES))
         .build()
         .also {
-            Log.d(TAG, "OkHttpClient configured: connect=15s, read=15s, write=15s")
+            Log.d(TAG, "OkHttpClient configured with enhanced settings")
         }
     
     private var retrofit: Retrofit? = null
@@ -98,15 +114,95 @@ object ApiClient {
     fun logApiError(context: Context, endpoint: String, error: Throwable) {
         Log.e(TAG, "❌ API Error: $endpoint", error)
         when {
-            error.message?.contains("ConnectException") == true -> {
+            error is ConnectException -> {
                 Log.e(TAG, "🔌 Connection Error: Server might be down or unreachable at ${getBaseUrl(context)}")
+                Log.e(TAG, "💡 Suggestion: Check if the backend server is running and accessible")
             }
-            error.message?.contains("SocketTimeoutException") == true -> {
-                Log.e(TAG, "⏰ Timeout Error: Request took longer than expected")
+            error is SocketTimeoutException -> {
+                Log.e(TAG, "⏰ Timeout Error: Request took longer than ${READ_TIMEOUT_SECONDS}s")
+                Log.e(TAG, "💡 Suggestion: Check network connectivity or server performance")
             }
-            error.message?.contains("UnknownHostException") == true -> {
+            error is UnknownHostException -> {
                 Log.e(TAG, "🌐 Network Error: Cannot resolve host ${getBaseUrl(context)}")
+                Log.e(TAG, "💡 Suggestion: Check DNS resolution and network configuration")
             }
+            error is IOException -> {
+                Log.e(TAG, "📡 IO Error: Network communication failed")
+                Log.e(TAG, "💡 Suggestion: Check network connectivity and firewall settings")
+            }
+            else -> {
+                Log.e(TAG, "❓ Unknown Error: ${error.javaClass.simpleName}")
+            }
+        }
+    }
+    
+    /**
+     * Retry interceptor for automatic retry on network failures
+     */
+    private class RetryInterceptor : okhttp3.Interceptor {
+        override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+            val request = chain.request()
+            var response: okhttp3.Response? = null
+            var exception: Exception? = null
+            
+            for (attempt in 0..MAX_RETRIES) {
+                try {
+                    response = chain.proceed(request)
+                    
+                    // If response is successful, return it immediately
+                    if (response.isSuccessful) {
+                        Log.d(TAG, "✅ Request successful on attempt ${attempt + 1}")
+                        return response
+                    }
+                    
+                    // If response is not successful but not a network error, don't retry
+                    if (response.code in 400..499) {
+                        Log.w(TAG, "⚠️ Client error (${response.code}), not retrying")
+                        return response
+                    }
+                    
+                    // For server errors (5xx), retry
+                    if (response.code in 500..599) {
+                        Log.w(TAG, "🔄 Server error (${response.code}), retrying... (attempt ${attempt + 1}/${MAX_RETRIES + 1})")
+                        response.close()
+                        if (attempt < MAX_RETRIES) {
+                            Thread.sleep(RETRY_DELAY_MS * (attempt + 1))
+                            continue
+                        }
+                    }
+                    
+                    return response
+                    
+                } catch (e: Exception) {
+                    exception = e
+                    Log.w(TAG, "🔄 Network error on attempt ${attempt + 1}/${MAX_RETRIES + 1}: ${e.message}")
+                    
+                    // Don't retry on client errors
+                    if (e is ConnectException || e is UnknownHostException) {
+                        Log.e(TAG, "❌ Connection error, not retrying: ${e.message}")
+                        break
+                    }
+                    
+                    // Retry on timeout and IO errors
+                    if (e is SocketTimeoutException || e is IOException) {
+                        if (attempt < MAX_RETRIES) {
+                            try {
+                                Thread.sleep(RETRY_DELAY_MS * (attempt + 1))
+                                continue
+                            } catch (ie: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                break
+                            }
+                        }
+                    }
+                    
+                    break
+                }
+            }
+            
+            // If we get here, all retries failed
+            Log.e(TAG, "❌ All ${MAX_RETRIES + 1} attempts failed")
+            throw exception ?: IOException("Request failed after ${MAX_RETRIES + 1} attempts")
         }
     }
 }
