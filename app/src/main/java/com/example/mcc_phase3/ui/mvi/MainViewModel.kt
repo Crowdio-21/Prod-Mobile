@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.mcc_phase3.data.models.*
 import com.example.mcc_phase3.data.repository.CrowdComputeRepository
 import com.example.mcc_phase3.data.websocket.WebSocketManager
+import com.example.mcc_phase3.data.ConfigManager
 import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -141,7 +142,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun connectWebSocket() {
         Log.d(TAG, "🔌 connectWebSocket() called")
-        val wsUrl = "ws://192.168.8.120:9000" // TODO: make configurable
+        val configManager = ConfigManager.getInstance(getApplication())
+        val wsUrl = configManager.getForemanURL() // Using ConfigManager
         Log.d(TAG, "🔌 Connecting to: $wsUrl")
         repository.connectWebSocket(wsUrl)
     }
