@@ -16,12 +16,14 @@ class ConfigManager private constructor(context: Context) {
         private const val PREFS_NAME = "CrowdComputeConfig"
         private const val KEY_FOREMAN_IP = "foreman_ip"
         private const val KEY_FOREMAN_PORT = "foreman_port"
+        private const val KEY_WEBSOCKET_PORT = "websocket_port"
         private const val KEY_STATISTICS_PORT = "statistics_port"
         
         // Default values
-        const val DEFAULT_FOREMAN_IP = "192.168.1.100"
-        const val DEFAULT_FOREMAN_PORT = 9000
-        const val DEFAULT_STATISTICS_PORT = 8000
+        const val DEFAULT_FOREMAN_IP = "192.168.8.101"
+        const val DEFAULT_FOREMAN_PORT = 8000  // HTTP API port
+        const val DEFAULT_WEBSOCKET_PORT = 9000  // WebSocket port
+        const val DEFAULT_STATISTICS_PORT = 8000  // Same as foreman for now
         
         @Volatile
         private var instance: ConfigManager? = null
@@ -66,12 +68,36 @@ class ConfigManager private constructor(context: Context) {
     }
     
     /**
+     * Get the stored WebSocket port
+     */
+    fun getWebSocketPort(): Int {
+        return prefs.getInt(KEY_WEBSOCKET_PORT, DEFAULT_WEBSOCKET_PORT)
+    }
+    
+    /**
+     * Set the WebSocket port
+     */
+    fun setWebSocketPort(port: Int) {
+        Log.d(TAG, "Setting WebSocket port to: $port")
+        prefs.edit().putInt(KEY_WEBSOCKET_PORT, port).apply()
+    }
+    
+    /**
      * Get the complete foreman WebSocket URL
      */
     fun getForemanURL(): String {
         val ip = getForemanIP()
-        val port = getForemanPort()
+        val port = getWebSocketPort()  // Use WebSocket port for WebSocket URL
         return "ws://$ip:$port"
+    }
+    
+    /**
+     * Get the complete foreman HTTP API URL
+     */
+    fun getForemanHttpURL(): String {
+        val ip = getForemanIP()
+        val port = getForemanPort()  // Use HTTP port for HTTP API URL
+        return "http://$ip:$port"
     }
 
     
@@ -152,8 +178,10 @@ class ConfigManager private constructor(context: Context) {
         return """
             Configuration Summary:
             - Foreman IP: ${getForemanIP()}
-            - Foreman Port: ${getForemanPort()}
-            - Foreman URL: ${getForemanURL()}
+            - Foreman Port (HTTP): ${getForemanPort()}
+            - WebSocket Port: ${getWebSocketPort()}
+            - Foreman HTTP URL: ${getForemanHttpURL()}
+            - Foreman WebSocket URL: ${getForemanURL()}
             - Stat Service IP: ${getForemanIP()}
             - Stat Service Port: ${getStatServicePort()}
             - Stat Service URL: ${getStatServiceURL()}
