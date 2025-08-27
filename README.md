@@ -1,83 +1,248 @@
 # CrowdCompute Mobile App
 
-A modern Android mobile application for monitoring and managing CrowdCompute distributed computing framework.
+A modern, professional Android application for monitoring and managing the CrowdCompute distributed computing framework. Built with Material Design 3, featuring a clean interface, dark mode support, and robust network resilience.
 
-## Features
+## ✨ Features
 
-- **Real-time Dashboard**: View live statistics of jobs, tasks, and workers
-- **Job Management**: Monitor job progress and status
-- **Worker Monitoring**: Track worker performance and availability
-- **Activity Log**: View recent system activities
-- **WebSocket Integration**: Real-time updates from the CrowdCompute framework
+### 🎯 Core Functionality
+- **Real-time Dashboard**: Live monitoring of jobs, tasks, and workers
+- **Job Management**: Track job progress, completion status, and task distribution
+- **Worker Monitoring**: Monitor worker availability, performance, and task execution
+- **Activity Log**: View recent system events and activities
+- **Mobile Worker Control**: Direct control and monitoring of mobile worker services
 
-## Architecture
+### 🎨 Modern UI/UX
+- **Material Design 3**: Latest Android design language with professional aesthetics
+- **Dark Mode Support**: Complete dark theme with automatic system detection
+- **Responsive Layout**: Optimized for various screen sizes and orientations
+- **Bottom Navigation**: Modern tab-based navigation for easy access
+- **Professional Design**: Clean, emoji-free interface suitable for enterprise use
 
-The app follows clean architecture principles and uses the MVI (Model-View-Intent) pattern:
+### 🔧 Advanced Features
+- **Network Resilience**: Robust error handling with circuit breaker pattern
+- **Automatic Retries**: Exponential backoff for network failures
+- **Connection Pooling**: Optimized network performance
+- **Real-time Updates**: WebSocket integration for live data
+- **Settings Management**: Configurable network endpoints and parameters
 
-- **Data Layer**: API service, WebSocket manager, and repository
-- **Domain Layer**: Use cases and business logic
-- **Presentation Layer**: ViewModels, Fragments, and UI components
-- **UI Layer**: Material 3 design with XML layouts
+## 🏗️ Architecture
 
-## Setup
+The app follows clean architecture principles with modern Android development patterns:
+
+### **Data Layer**
+- **API Service**: Retrofit-based REST API client
+- **WebSocket Manager**: Real-time communication with CrowdCompute framework
+- **Repository Pattern**: Centralized data management with circuit breaker
+- **Config Manager**: Network configuration and endpoint management
+
+### **Domain Layer**
+- **Use Cases**: Business logic and data processing
+- **Models**: Data classes for jobs, workers, and system statistics
+- **Error Handling**: Comprehensive exception management
+
+### **Presentation Layer**
+- **MVI Pattern**: Model-View-Intent for state management
+- **ViewModels**: Lifecycle-aware data holders
+- **Fragments**: Modular UI components
+- **Theme Manager**: Dynamic theme switching and persistence
+
+### **UI Layer**
+- **Material 3**: Modern design system
+- **ConstraintLayout**: Flexible, responsive layouts
+- **ViewPager2**: Smooth tab navigation
+- **RecyclerView**: Efficient list rendering
+
+## 🚀 Setup & Installation
 
 ### Prerequisites
+- **Android Studio**: Arctic Fox or later
+- **Android SDK**: API level 27+ (Android 8.1+)
+- **CrowdCompute Framework**: Running on your network
+- **Network Access**: Device must be able to reach the CrowdCompute server
 
-- Android Studio Arctic Fox or later
-- Android SDK 27+ (API level 27)
-- CrowdCompute framework running on your network
+### Quick Start
 
-### Configuration
+1. **Clone the Repository**
+   ```bash
+   git clone <repository-url>
+   cd MCC-Phase3
+   ```
 
-1. **Update API Base URL**: 
-   - For emulator: `http://10.0.2.2:8000` (default)
-   - For physical device: Update `ApiClient.kt` with your server's IP address
+2. **Open in Android Studio**
+   - Launch Android Studio
+   - Open the project folder
+   - Wait for Gradle sync to complete
 
-2. **Update WebSocket URL**:
-   - Default: `ws://10.0.2.2:9000`
-   - Update in `MainViewModel.kt` for your network
+3. **Configure Network Settings**
+   - Open `SettingsActivity` in the app
+   - Update the Foreman IP address to match your server
+   - Default ports: API (8000), WebSocket (9000)
+
+4. **Build and Run**
+   - Connect your Android device or start an emulator
+   - Click "Run" in Android Studio
+   - Grant necessary permissions when prompted
 
 ### Network Configuration
 
-The app is configured to connect to:
-- **API Endpoint**: Port 8000 (FastAPI worker)
-- **WebSocket**: Port 9000 (Foreman)
+The app connects to CrowdCompute framework via:
+- **API Endpoint**: `http://[FOREMAN_IP]:8000` (FastAPI worker)
+- **WebSocket**: `ws://[FOREMAN_IP]:9000` (Foreman real-time updates)
 
-Make sure your CrowdCompute framework is accessible from your mobile device's network.
+**Common IP Addresses:**
+- **Emulator**: `10.0.2.2` (localhost)
+- **Physical Device**: Your computer's local IP (e.g., `192.168.1.100`)
 
-## Usage
+## 📱 Usage Guide
 
-1. **Dashboard**: View overall system statistics and connection status
-2. **Jobs**: Monitor job progress, completion status, and task counts
-3. **Workers**: Track worker availability, performance, and current tasks
-4. **Activity**: View recent system events and activities
+### Dashboard Overview
+- **Status Card**: Real-time connection status and system health
+- **Quick Actions**: Mobile worker control and settings access
+- **Tab Navigation**: Switch between Dashboard, Jobs, Workers, and Activity
 
-## Dependencies
+### Theme Customization
+- **Light Mode**: Clean, professional light interface
+- **Dark Mode**: Modern dark theme for low-light environments
+- **System Mode**: Automatically follows device theme settings
+- **Toggle**: Tap the theme icon in the toolbar to switch themes
 
-- **Networking**: Retrofit, OkHttp
-- **WebSocket**: Java-WebSocket
-- **UI**: Material 3, ConstraintLayout, RecyclerView
-- **Architecture**: Navigation Component, ViewModel, LiveData
-- **JSON**: Gson
+### Network Management
+- **Circuit Breaker**: Automatic protection against cascading failures
+- **Retry Logic**: Intelligent retry with exponential backoff
+- **Connection Pooling**: Optimized network resource usage
+- **Error Handling**: User-friendly error messages and recovery
 
-## Building
+## 🛠️ Technical Details
 
-1. Clone the repository
-2. Open in Android Studio
-3. Update network configuration if needed
-4. Build and run on your device
+### Dependencies
 
-## Troubleshooting
+#### **Networking**
+- **Retrofit 2.9.0**: REST API client
+- **OkHttp 4.9.0**: HTTP client with interceptors
+- **Java-WebSocket**: WebSocket communication
 
-- **Connection Issues**: Verify your CrowdCompute framework is running and accessible
-- **Network Errors**: Check firewall settings and network configuration
-- **Build Errors**: Ensure all dependencies are properly synced
+#### **UI & Architecture**
+- **Material 3**: Modern design system
+- **Navigation Component**: Fragment navigation
+- **ViewModel & LiveData**: Lifecycle-aware data management
+- **ViewPager2**: Tab navigation
+- **ConstraintLayout**: Flexible layouts
 
-## Contributing
+#### **JSON & Utilities**
+- **Gson**: JSON serialization/deserialization
+- **Coroutines**: Asynchronous programming
+- **SharedPreferences**: Theme and settings persistence
 
-This app follows Kotlin best practices and Material Design guidelines. When contributing:
+### Network Resilience Features
 
-- Follow the established architecture patterns
-- Use proper error handling and loading states
-- Maintain consistent UI/UX patterns
-- Add appropriate tests for new functionality
+#### **Circuit Breaker Pattern**
+- **Threshold**: 5 consecutive failures
+- **Timeout**: 60 seconds recovery period
+- **Success Threshold**: 2 successful requests to close circuit
+- **Manual Reset**: Available for debugging
+
+#### **Retry Mechanism**
+- **Max Retries**: 3 attempts per request
+- **Backoff Strategy**: Exponential delay (1s, 2s, 4s)
+- **Timeout Configuration**: 30s connect, 60s read, 30s write
+
+#### **Connection Pooling**
+- **Pool Size**: 5 connections
+- **Keep-Alive**: 5 minutes
+- **Optimization**: Reduced connection overhead
+
+## 🎨 UI/UX Features
+
+### **Material Design 3**
+- **Color System**: Dynamic color palette with light/dark variants
+- **Typography**: Consistent text hierarchy and readability
+- **Components**: Modern buttons, cards, and navigation elements
+- **Animations**: Smooth transitions and micro-interactions
+
+### **Dark Mode Implementation**
+- **Automatic Detection**: Follows system theme preferences
+- **Manual Toggle**: Easy switching between themes
+- **Persistent Settings**: Remembers user preferences
+- **Consistent Theming**: All components support both themes
+
+### **Professional Design**
+- **Clean Interface**: Minimal, focused design without unnecessary elements
+- **Information Hierarchy**: Clear visual organization of data
+- **Accessibility**: Proper contrast ratios and touch targets
+- **Responsive Layout**: Adapts to different screen sizes
+
+## 🔧 Configuration
+
+### **Settings Activity**
+Access via the settings button to configure:
+- **Foreman IP Address**: Server endpoint configuration
+- **Port Settings**: API and WebSocket port customization
+- **Connection Testing**: Verify network connectivity
+- **Reset Options**: Restore default settings
+
+### **Theme Management**
+- **Theme Persistence**: Settings saved across app sessions
+- **Dynamic Switching**: Instant theme application
+- **System Integration**: Respects device theme preferences
+
+## 🐛 Troubleshooting
+
+### **Common Issues**
+
+#### **Connection Problems**
+- **Verify Server**: Ensure CrowdCompute framework is running
+- **Check IP Address**: Confirm correct Foreman IP in settings
+- **Network Access**: Test connectivity from device to server
+- **Firewall**: Ensure ports 8000 and 9000 are accessible
+
+#### **Build Errors**
+- **Gradle Sync**: Refresh project and sync dependencies
+- **SDK Version**: Ensure Android SDK 27+ is installed
+- **Dependencies**: Check all required libraries are included
+
+#### **Runtime Issues**
+- **Permissions**: Grant necessary network permissions
+- **Memory**: Close other apps if experiencing slowdowns
+- **Theme Issues**: Try switching themes or restarting the app
+
+### **Debug Features**
+- **Circuit Breaker Status**: Monitor in dashboard status
+- **Network Logs**: Check Android Studio logcat for detailed errors
+- **Manual Reset**: Use reset button for circuit breaker issues
+
+## 🤝 Contributing
+
+We welcome contributions! Please follow these guidelines:
+
+### **Code Standards**
+- **Kotlin Best Practices**: Follow official Kotlin conventions
+- **Clean Architecture**: Maintain separation of concerns
+- **Material Design**: Adhere to Material 3 guidelines
+- **Error Handling**: Implement proper exception management
+
+### **Development Process**
+1. **Fork** the repository
+2. **Create** a feature branch
+3. **Implement** your changes
+4. **Test** thoroughly on different devices
+5. **Submit** a pull request with detailed description
+
+### **Testing Requirements**
+- **Unit Tests**: For business logic and utilities
+- **UI Tests**: For critical user flows
+- **Integration Tests**: For API and WebSocket functionality
+- **Theme Testing**: Verify both light and dark modes
+
+## 📄 License
+
+This project is part of the CrowdCompute framework. Please refer to the main project license for usage terms.
+
+## 🔗 Related Projects
+
+- **CrowdCompute Framework**: Main distributed computing platform
+- **Foreman Service**: Central coordination service
+- **Worker Services**: Task execution services
+
+---
+
+**Built with ❤️ for the CrowdCompute community**
