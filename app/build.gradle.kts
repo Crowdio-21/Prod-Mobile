@@ -42,6 +42,15 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    
+    chaquopy {
+        defaultConfig {
+            version = "3.8"
+            pip {
+                install("websockets")
+            }
+        }
+    }
 }
 
 dependencies {
