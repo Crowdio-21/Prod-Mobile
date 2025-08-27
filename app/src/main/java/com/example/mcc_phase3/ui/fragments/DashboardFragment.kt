@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.example.mcc_phase3.R
 import com.example.mcc_phase3.databinding.FragmentDashboardBinding
 import com.example.mcc_phase3.ui.adapters.ActivityAdapter
 import com.example.mcc_phase3.ui.mvi.MainEvent
@@ -131,7 +132,6 @@ class DashboardFragment : Fragment() {
                 Log.d(TAG, "📊 Updating stats: totalJobs=${stats.totalJobs}, totalTasks=${stats.totalTasks}, totalWorkers=${stats.totalWorkers}")
                 binding.totalJobsValue.text = stats.totalJobs.toString()
                 binding.totalTasksValue.text = stats.totalTasks.toString()
-                binding.totalWorkersValue.text = stats.totalWorkers.toString()
                 binding.activeJobsValue.text = stats.activeJobs.toString()
                 binding.completedJobsValue.text = stats.completedJobs.toString()
                 Log.d(TAG, "📊 Stats updated successfully")
@@ -165,8 +165,8 @@ class DashboardFragment : Fragment() {
             binding.connectionStatusText.text = if (isConnected) "Connected" else "Disconnected"
             binding.connectionStatusText.setTextColor(
                 requireContext().getColor(
-                    if (isConnected) android.R.color.holo_green_light 
-                    else android.R.color.holo_red_light
+                    if (isConnected) R.color.success 
+                    else R.color.error
                 )
             )
             Log.d(TAG, "🔌 Connection status updated successfully")
