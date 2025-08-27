@@ -1,5 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Light Theme Colors -->
+    <color name="primary">#1976D2</color>
+    <color name="primary_dark">#1565C0</color>
+    <color name="primary_light">#BBDEFB</color>
+    <color name="accent">#FF5722</color>
+    <color name="surface_primary">#FFFFFF</color>
+    <color name="surface_secondary">#F5F5F5</color>
+    <color name="background_light">#FAFAFA</color>
+    <color name="text_primary">#212121</color>
+    <color name="text_secondary">#757575</color>
+    <color name="success">#4CAF50</color>
+    <color name="warning">#FF9800</color>
+    <color name="error">#F44336</color>
+    <color name="info">#2196F3</color>
+
+    <!-- Dark Theme Colors -->
+    <color name="primary_dark_theme">#90CAF9</color>
+    <color name="primary_dark_dark_theme">#64B5F6</color>
+    <color name="primary_light_dark_theme">#1976D2</color>
+    <color name="accent_dark_theme">#FF8A65</color>
+    <color name="surface_primary_dark">#121212</color>
+    <color name="surface_secondary_dark">#1E1E1E</color>
+    <color name="background_dark">#000000</color>
+    <color name="text_primary_dark">#FFFFFF</color>
+    <color name="text_secondary_dark">#B3FFFFFF</color>
+    <color name="success_dark">#81C784</color>
+    <color name="warning_dark">#FFB74D</color>
+    <color name="error_dark">#E57373</color>
+    <color name="info_dark">#64B5F6</color>
+
+    <!-- Legacy Colors (for backward compatibility) -->
     <color name="purple_200">#FFBB86FC</color>
     <color name="purple_500">#FF6200EE</color>
     <color name="purple_700">#FF3700B3</color>
@@ -7,8 +38,4 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
-    
-    <!-- Connection status colors -->
-    <color name="connection_connected">#4CAF50</color>
-    <color name="connection_disconnected">#F44336</color>
 </resources>
