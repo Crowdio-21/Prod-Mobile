@@ -28,6 +28,17 @@
         app:cornerRadius="12dp"
         android:layout_marginBottom="16dp" />
 
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/deviceInfoButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📱 Device Information"
+        android:textSize="16sp"
+        android:padding="16dp"
+        app:cornerRadius="12dp"
+        android:layout_marginBottom="16dp"
+        android:backgroundTint="@android:color/holo_green_dark" />
+
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
