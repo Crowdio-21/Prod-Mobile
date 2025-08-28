@@ -6,6 +6,7 @@ import com.example.mcc_phase3.data.api.ApiService
 import com.example.mcc_phase3.data.models.*
 import com.example.mcc_phase3.data.websocket.WebSocketManager
 import com.example.mcc_phase3.data.ConfigManager
+import com.example.mcc_phase3.data.device.DeviceInfoManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
@@ -19,6 +20,7 @@ import java.io.IOException
 class CrowdComputeRepository(private val context: android.content.Context) {
     private val apiService: ApiService = ApiClient.getApiService(context)
     private val webSocketManager = WebSocketManager.getInstance() // ✅ Use singleton instance
+    private val deviceInfoManager = DeviceInfoManager(context) // Device information manager
 
     companion object {
         private const val TAG = "CrowdComputeRepository"
@@ -290,5 +292,147 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         successCount = 0
         isCircuitOpen = false
         lastFailureTime = 0L
+    }
+    
+    // ==================== DEVICE INFORMATION METHODS ====================
+    
+    /**
+     * Get comprehensive device metrics
+     */
+    suspend fun getDeviceMetrics(): Result<DeviceMetrics> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "📊 getDeviceMetrics() called")
+        
+        try {
+            val metrics = deviceInfoManager.getDeviceMetrics()
+            Log.d(TAG, "✅ Device metrics collected successfully")
+            Log.d(TAG, "📊 Device: ${metrics.deviceInfo.manufacturer} ${metrics.deviceInfo.model}")
+            Log.d(TAG, "🔋 Battery: ${metrics.batteryInfo.level}%, ${metrics.batteryInfo.chargeStatus}")
+            Log.d(TAG, "💾 RAM: ${metrics.ramInfo.ramUsagePercentage}% used")
+            Log.d(TAG, "💿 Storage: ${metrics.storageInfo.internalStorage.usagePercentage}% used")
+            
+            Result.success(metrics)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get device metrics", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Get battery information
+     */
+    suspend fun getBatteryInfo(): Result<BatteryInfo> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "🔋 getBatteryInfo() called")
+        
+        try {
+            val batteryInfo = deviceInfoManager.getBatteryInfo()
+            Log.d(TAG, "✅ Battery info collected: ${batteryInfo.level}%, ${batteryInfo.chargeStatus}")
+            Result.success(batteryInfo)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get battery info", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Get RAM information
+     */
+    suspend fun getRamInfo(): Result<RamInfo> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "💾 getRamInfo() called")
+        
+        try {
+            val ramInfo = deviceInfoManager.getRamInfo()
+            Log.d(TAG, "✅ RAM info collected: ${ramInfo.ramUsagePercentage}% used")
+            Result.success(ramInfo)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get RAM info", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Get storage information
+     */
+    suspend fun getStorageInfo(): Result<StorageInfo> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "💿 getStorageInfo() called")
+        
+        try {
+            val storageInfo = deviceInfoManager.getStorageInfo()
+            Log.d(TAG, "✅ Storage info collected: Internal=${storageInfo.internalStorage.usagePercentage}%")
+            Result.success(storageInfo)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get storage info", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Get device information
+     */
+    suspend fun getDeviceInfo(): Result<DeviceInfo> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "📱 getDeviceInfo() called")
+        
+        try {
+            val deviceInfo = deviceInfoManager.getDeviceInfo()
+            Log.d(TAG, "✅ Device info collected: ${deviceInfo.manufacturer} ${deviceInfo.model}")
+            Result.success(deviceInfo)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get device info", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Get network information
+     */
+    suspend fun getNetworkInfo(): Result<NetworkInfo> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "🌐 getNetworkInfo() called")
+        
+        try {
+            val networkInfo = deviceInfoManager.getNetworkInfo()
+            Log.d(TAG, "✅ Network info collected: ${networkInfo.connectionType}")
+            Result.success(networkInfo)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get network info", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Set security configuration for device information collection
+     */
+    fun setDeviceInfoSecurityConfig(config: SecurityConfig) {
+        Log.d(TAG, "🔒 Setting device info security config: $config")
+        deviceInfoManager.setSecurityConfig(config)
+    }
+    
+    /**
+     * Get cached device metrics (if available)
+     */
+    fun getCachedDeviceMetrics(): DeviceMetrics? {
+        return deviceInfoManager.getCachedDeviceMetrics()
+    }
+    
+    /**
+     * Clear device information cache
+     */
+    fun clearDeviceInfoCache() {
+        Log.d(TAG, "🗑️ Clearing device info cache")
+        deviceInfoManager.clearCache()
+    }
+    
+    /**
+     * Get device information summary for logging
+     */
+    fun getDeviceInfoSummary(): String {
+        val cachedMetrics = getCachedDeviceMetrics()
+        return if (cachedMetrics != null) {
+            "Device: ${cachedMetrics.deviceInfo.manufacturer} ${cachedMetrics.deviceInfo.model}, " +
+            "Battery: ${cachedMetrics.batteryInfo.level}%, " +
+            "RAM: ${cachedMetrics.ramInfo.ramUsagePercentage}%, " +
+            "Storage: ${cachedMetrics.storageInfo.internalStorage.usagePercentage}%, " +
+            "Network: ${cachedMetrics.networkInfo.connectionType}"
+        } else {
+            "Device metrics not available"
+        }
     }
 }

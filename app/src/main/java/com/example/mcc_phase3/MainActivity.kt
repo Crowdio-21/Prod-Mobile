@@ -25,5 +25,14 @@ class MainActivity : AppCompatActivity() {
             val intent = Intent(this, DashboardActivity::class.java)
             startActivity(intent)
         }
+        
+        // Find the device info button
+        val deviceInfoButton = findViewById<Button>(R.id.deviceInfoButton)
+        
+        // Set click listener to launch device info activity
+        deviceInfoButton?.setOnClickListener {
+            val intent = Intent(this, DeviceInfoActivity::class.java)
+            startActivity(intent)
+        }
     }
 }
