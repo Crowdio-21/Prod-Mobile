@@ -40,3 +40,4 @@ object ThemeManager {
         LIGHT, DARK, SYSTEM
     }
 }
+
