@@ -145,13 +145,12 @@ class DashboardFragment : Fragment() {
                 Log.d(TAG, "🔌 WebSocket stats updated successfully")
             } ?: Log.w(TAG, "🔌 WebSocket stats data is null")
             
-            // Update recent activities
-            state.activity?.let { activities ->
-                val displayActivities = activities.take(5)
-                Log.d(TAG, "📈 Updating activities: showing ${displayActivities.size} out of ${activities.size} total activities")
-                activityAdapter.submitList(displayActivities)
-                Log.d(TAG, "📈 Activities updated successfully")
-            } ?: Log.w(TAG, "📈 Activity data is null")
+            // Update recent activities (filtered for this device)
+            val filteredActivities = viewModel.getActivityForCurrentWorker()
+            val displayActivities = filteredActivities.take(5)
+            Log.d(TAG, "📈 Updating activities: showing ${displayActivities.size} out of ${filteredActivities.size} filtered activities for this device")
+            activityAdapter.submitList(displayActivities)
+            Log.d(TAG, "📈 Activities updated successfully")
             
             Log.d(TAG, "📊 Dashboard update completed")
         } catch (e: Exception) {
