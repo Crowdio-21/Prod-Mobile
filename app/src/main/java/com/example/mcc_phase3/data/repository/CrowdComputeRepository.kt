@@ -215,6 +215,31 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         }
     }
 
+    suspend fun getActivity(): Result<List<Activity>> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "📈 getActivity() called")
+        ApiClient.logApiCall(context, "/api/activity")
+
+        try {
+            checkCircuitBreaker()
+            
+            val startTime = System.currentTimeMillis()
+            val activity = apiService.getActivity()
+            val duration = System.currentTimeMillis() - startTime
+
+            Log.d(TAG, "✅ getActivity() successful in ${duration}ms")
+            Log.d(TAG, "📈 Retrieved ${activity.size} activities")
+            activity.forEachIndexed { index, act ->
+                Log.v(TAG, "📈 Activity[$index]: type=${act.type}, action=${act.action}, details=${act.details}")
+            }
+            ApiClient.logApiSuccess("/api/activity", 200, activity.size)
+            
+            resetCircuitBreaker()
+            Result.success(activity)
+        } catch (e: Exception) {
+            handleApiError(e, "getActivity")
+        }
+    }
+
     suspend fun getWebsocketStats(): Result<WebsocketStats> = withContext(Dispatchers.IO) {
         Log.d(TAG, "🔌 getWebsocketStats() called")
         ApiClient.logApiCall(context, "/api/websocket-stats")
