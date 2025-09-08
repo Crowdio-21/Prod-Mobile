@@ -31,7 +31,7 @@ class WorkerConfig:
     foreman_url: str = "ws://192.168.8.101:9000"
     max_concurrent_tasks: int = 1
     auto_restart: bool = True
-    heartbeat_interval: int = 30
+    heartbeat_interval: int = 15  # Reduced from 30 to 15 seconds for better connection stability
     mobile_device_id: Optional[str] = None
     battery_threshold: int = 20  # Minimum battery percentage to continue working
 
@@ -83,6 +83,11 @@ class MobileWorker:
         self.network_available = True
         self.is_charging = False
         
+        # Connection monitoring
+        self.last_heartbeat_sent = None
+        self.last_heartbeat_received = None
+        self.connection_quality = "good"
+        
         # Setup logging
         self._setup_logging()
         
@@ -91,18 +96,27 @@ class MobileWorker:
         print(f"📱 Platform: {self.stats['platform']}")
     
     def _get_device_id(self) -> str:
-        """Get unique device identifier"""
+        """Get unique device identifier using WorkerIdManager"""
         if MOBILE_AVAILABLE:
             try:
-                # Use Android ID as device identifier
-                from android.provider import Settings
-                android_id = Settings.Secure.getString(
-                    mActivity.getContentResolver(), 
-                    Settings.Secure.ANDROID_ID
-                )
-                return f"android_{android_id}"
+                # Use WorkerIdBridge to get persistent worker ID
+                from com.example.mcc_phase3.data import WorkerIdBridge
+                worker_id_bridge = WorkerIdBridge(mActivity)
+                worker_id = worker_id_bridge.getOrGenerateWorkerId()
+                print(f"📱 Retrieved worker ID from WorkerIdManager: {worker_id}")
+                return worker_id
             except Exception as e:
-                print(f"Warning: Could not get Android ID: {e}")
+                print(f"Warning: Could not get worker ID from WorkerIdManager: {e}")
+                # Fallback to Android ID
+                try:
+                    from android.provider import Settings
+                    android_id = Settings.Secure.getString(
+                        mActivity.getContentResolver(), 
+                        Settings.Secure.ANDROID_ID
+                    )
+                    return f"android_{android_id}"
+                except Exception as e2:
+                    print(f"Warning: Could not get Android ID: {e2}")
         
         # Fallback to UUID
         return f"mobile_{uuid.uuid4().hex[:8]}"
@@ -292,6 +306,13 @@ class MobileWorker:
             def onFailure(self, webSocket, t, response):
                 self.worker._log(f"WebSocket connection failed: {t}", "ERROR")
                 self.worker.is_connected = False
+                # Schedule reconnection attempt
+                if self.worker.loop and not self.worker.loop.is_closed():
+                    self.worker.loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(
+                            self.worker._attempt_reconnection()
+                        )
+                    )
         
         return MobileWebSocketListener(self)
     
@@ -333,6 +354,26 @@ class MobileWorker:
         except Exception as e:
             self._log(f"Error sending message: {e}", "ERROR")
     
+    async def _attempt_reconnection(self):
+        """Attempt to reconnect to the foreman"""
+        self._log("🔄 Attempting to reconnect to foreman...")
+        
+        try:
+            # Disconnect first
+            await self.disconnect()
+            
+            # Wait a bit before reconnecting
+            await asyncio.sleep(5)
+            
+            # Attempt to reconnect
+            if await self.connect():
+                self._log("✅ Reconnection successful")
+            else:
+                self._log("❌ Reconnection failed", "ERROR")
+                
+        except Exception as e:
+            self._log(f"❌ Reconnection error: {e}", "ERROR")
+    
     async def disconnect(self):
         """Disconnect from the foreman"""
         if self.websocket:
@@ -369,6 +410,12 @@ class MobileWorker:
                     }
                 )
                 await self._send_message(pong_message)
+                self.last_heartbeat_received = datetime.now()
+                self._log("🏓 Pong sent in response to ping")
+            elif message.type == MessageType.PONG:
+                # Received pong response
+                self.last_heartbeat_received = datetime.now()
+                self._log("🏓 Pong received from server")
             else:
                 self._log(f"Unknown message type: {message.type}")
                 
@@ -515,6 +562,9 @@ class MobileWorker:
     
     async def heartbeat(self):
         """Send periodic heartbeat to foreman with mobile status"""
+        consecutive_failures = 0
+        max_failures = 3
+        
         while self.is_connected:
             try:
                 # Update mobile conditions
@@ -535,12 +585,26 @@ class MobileWorker:
                         }
                     )
                     await self._send_message(heartbeat_message)
+                    consecutive_failures = 0  # Reset failure count on success
+                    self.last_heartbeat_sent = datetime.now()
+                    self._log(f"💓 Heartbeat sent successfully")
+                else:
+                    self._log("⚠️ No WebSocket connection for heartbeat", "WARNING")
+                    consecutive_failures += 1
                 
                 await asyncio.sleep(self.config.heartbeat_interval)
                 
             except Exception as e:
-                self._log(f"❌ Error sending heartbeat: {e}", "ERROR")
-                break
+                consecutive_failures += 1
+                self._log(f"❌ Error sending heartbeat (failure #{consecutive_failures}): {e}", "ERROR")
+                
+                if consecutive_failures >= max_failures:
+                    self._log(f"🚨 Too many heartbeat failures ({consecutive_failures}), attempting reconnection", "ERROR")
+                    await self._attempt_reconnection()
+                    consecutive_failures = 0  # Reset after reconnection attempt
+                
+                # Wait a bit before retrying
+                await asyncio.sleep(5)
     
     async def start(self):
         """Start the mobile worker"""
@@ -643,6 +707,16 @@ class MobileWorker:
                 "uptime_seconds": (datetime.now() - self.stats["started_at"]).total_seconds()
             }
         }
+        
+        # Add worker ID information from WorkerIdManager
+        if MOBILE_AVAILABLE:
+            try:
+                from com.example.mcc_phase3.data import WorkerIdBridge
+                worker_id_bridge = WorkerIdBridge(mActivity)
+                worker_id_info = worker_id_bridge.getWorkerIdInfo()
+                device_info["worker_id_info"] = worker_id_info
+            except Exception as e:
+                device_info["worker_id_info"] = {"error": str(e)}
         
         # Add Android-specific info if available
         if MOBILE_AVAILABLE:
