@@ -1,13 +1,22 @@
 package com.example.mcc_phase3.services
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.os.Binder
+import android.os.Build
 import android.os.Environment
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import com.example.mcc_phase3.R
+import com.example.mcc_phase3.data.WorkerIdManager
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -20,12 +29,15 @@ class MobileWorkerService : Service() {
     
     companion object {
         private const val TAG = "MobileWorkerService"
-        private const val WORKER_ID_PREFIX = "android_worker"
+        private const val NOTIFICATION_ID = 1001
+        private const val CHANNEL_ID = "mobile_worker_channel"
+        private const val CHANNEL_NAME = "Mobile Worker Service"
     }
     
     private val binder = LocalBinder()
     private val isRunning = AtomicBoolean(false)
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private lateinit var workerIdManager: WorkerIdManager
     
     // Python modules
     private var mobileWorkerModule: com.chaquo.python.PyObject? = null
@@ -39,6 +51,8 @@ class MobileWorkerService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
+        workerIdManager = WorkerIdManager.getInstance(this)
+        createNotificationChannel()
         initializePython()
     }
     
@@ -58,6 +72,9 @@ class MobileWorkerService : Service() {
             "GET_STATUS" -> getWorkerStatus()
         }
         
+        // Start as foreground service to prevent Android from killing it
+        startForeground(NOTIFICATION_ID, createNotification("Mobile Worker Service", "Worker is running"))
+        
         return START_STICKY
     }
     
@@ -66,6 +83,47 @@ class MobileWorkerService : Service() {
         Log.d(TAG, "Service destroyed")
         stopWorker()
         serviceScope.cancel()
+    }
+    
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Mobile Worker Service Channel"
+                setShowBadge(false)
+            }
+            
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+            Log.d(TAG, "Notification channel created")
+        }
+    }
+    
+    private fun createNotification(title: String, content: String): Notification {
+        val intent = Intent(this, com.example.mcc_phase3.MobileWorkerActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setSmallIcon(R.drawable.ic_worker)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+    }
+    
+    private fun updateNotification(title: String, content: String) {
+        val notification = createNotification(title, content)
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(NOTIFICATION_ID, notification)
     }
     
     /**
@@ -100,7 +158,8 @@ class MobileWorkerService : Service() {
                 Log.d(TAG, "Starting mobile worker...")
                 Log.d(TAG, "Foreman URL: $foremanUrl")
                 
-                val workerId = "${WORKER_ID_PREFIX}_${System.currentTimeMillis()}"
+                // Get or generate persistent worker ID
+                val workerId = workerIdManager.getOrGenerateWorkerId()
                 Log.d(TAG, "Worker ID: $workerId")
                 
                 // Create worker instance
@@ -114,6 +173,7 @@ class MobileWorkerService : Service() {
                 
                 if (workerInstance != null) {
                     isRunning.set(true)
+                    updateNotification("Mobile Worker Service", "Worker connected: $workerId")
                     
                     // Start worker in a separate thread to avoid blocking the service
                     workerThread = Thread {
@@ -238,6 +298,38 @@ class MobileWorkerService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Task execution test failed", e)
             mapOf("error" to e.message.toString())
+        }
+    }
+    
+    /**
+     * Get current worker ID
+     */
+    fun getCurrentWorkerId(): String? {
+        return try {
+            val workerId = workerIdManager.getCurrentWorkerId()
+            Log.d(TAG, "Current worker ID: $workerId")
+            workerId
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting worker ID", e)
+            null
+        }
+    }
+    
+    /**
+     * Get worker ID information
+     */
+    fun getWorkerIdInfo(): Map<String, Any?> {
+        return try {
+            val info = workerIdManager.getWorkerIdInfo()
+            mapOf(
+                "workerId" to info.workerId,
+                "deviceId" to info.deviceId,
+                "generatedAt" to info.generatedAt,
+                "hasWorkerId" to info.hasWorkerId
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting worker ID info", e)
+            mapOf("error" to e.message)
         }
     }
     

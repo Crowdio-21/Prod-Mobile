@@ -93,6 +93,8 @@ class MobileWorkerActivity : AppCompatActivity() {
         
         testButton.setOnClickListener {
             testMobileWorker()
+            // Also show worker ID info after testing
+            showWorkerIdInfo()
         }
         
         refreshButton.setOnClickListener {
@@ -163,6 +165,34 @@ class MobileWorkerActivity : AppCompatActivity() {
         }
     }
     
+    private fun showWorkerIdInfo() {
+        if (isBound && mobileWorkerService != null) {
+            try {
+                val workerIdInfo = mobileWorkerService?.getWorkerIdInfo()
+                val currentWorkerId = mobileWorkerService?.getCurrentWorkerId()
+                
+                val infoText = buildString {
+                    appendLine("🆔 Worker ID Information:")
+                    appendLine("Current Worker ID: $currentWorkerId")
+                    appendLine("")
+                    if (workerIdInfo != null) {
+                        appendLine("Detailed Info:")
+                        workerIdInfo.forEach { (key, value) ->
+                            appendLine("$key: $value")
+                        }
+                    }
+                }
+                
+                // Show in a dialog or update the mobile info text view
+                mobileInfoTextView.text = infoText
+                Log.d(TAG, "Worker ID info displayed: $infoText")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error showing worker ID info", e)
+                mobileInfoTextView.text = "Error getting worker ID info: ${e.message}"
+            }
+        }
+    }
+    
     private fun updateUI() {
         lifecycleScope.launch {
             if (isBound && mobileWorkerService != null) {
@@ -208,6 +238,17 @@ class MobileWorkerActivity : AppCompatActivity() {
                                 appendLine("Battery: ${mobileInfo.get("battery_level")}%")
                                 appendLine("Charging: ${mobileInfo.get("is_charging")}")
                                 appendLine("Network: ${mobileInfo.get("network_available")}")
+                                
+                                // Add worker ID info
+                                val workerIdInfo = mobileInfo.get("worker_id_info") as? Map<*, *>
+                                if (workerIdInfo != null) {
+                                    appendLine("")
+                                    appendLine("🆔 Worker ID Information:")
+                                    appendLine("Worker ID: ${workerIdInfo.get("workerId")}")
+                                    appendLine("Device ID: ${workerIdInfo.get("deviceId")}")
+                                    appendLine("Generated: ${workerIdInfo.get("generatedAt")}")
+                                    appendLine("Has ID: ${workerIdInfo.get("hasWorkerId")}")
+                                }
                             }
                             mobileInfoTextView.text = mobileText
                         }
