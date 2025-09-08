@@ -12,11 +12,13 @@ import com.example.mcc_phase3.data.models.*
 import com.example.mcc_phase3.data.repository.CrowdComputeRepository
 import com.example.mcc_phase3.data.websocket.WebSocketManager
 import com.example.mcc_phase3.data.ConfigManager
+import com.example.mcc_phase3.data.WorkerIdManager
 import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = CrowdComputeRepository(application)
+    private val workerIdManager = WorkerIdManager.getInstance(application)
 
     private val _state = MutableLiveData<MainState>(MainState.Loading)
     val state: LiveData<MainState> = _state
@@ -96,6 +98,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val websocketStats = repository.getWebsocketStats()
                 Log.d(TAG, "📊 WebSocket stats result: ${if (websocketStats.isSuccess) "✅ Success" else "❌ Failed - ${websocketStats.exceptionOrNull()?.message}"}")
 
+                Log.d(TAG, "📊 Fetching activity...")
+                val activity = repository.getActivity()
+                Log.d(TAG, "📊 Activity result: ${if (activity.isSuccess) "✅ Success" else "❌ Failed - ${activity.exceptionOrNull()?.message}"}")
+
                 // Core data requirement: stats, jobs, and workers must succeed
                 val success = stats.isSuccess && jobs.isSuccess && workers.isSuccess
 
@@ -106,6 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         jobs = jobs.getOrNull() ?: emptyList(),
                         workers = workers.getOrNull() ?: emptyList(),
                         websocketStats = websocketStats.getOrNull(),
+                        activity = activity.getOrNull() ?: emptyList(),
                         isWebSocketConnected = wsConnected
                     )
                     _state.value = successState
@@ -113,6 +120,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     Log.d(TAG, "✅ Data loaded successfully:")
                     Log.d(TAG, "   - Jobs: ${successState.jobs.size}")
                     Log.d(TAG, "   - Workers: ${successState.workers.size}")
+                    Log.d(TAG, "   - Activity: ${successState.activity.size}")
                     Log.d(TAG, "   - WebSocket connected: $wsConnected")
                 } else {
                     val errorMsg = buildString {
@@ -218,6 +226,118 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(TAG, "🔌 WebSocket connected but no success state yet - triggering loadData()")
             loadData()
         }
+    }
+
+    /**
+     * Get jobs filtered by current worker ID
+     * Note: Since Job model doesn't have worker assignment info, we'll show all jobs
+     * but this could be enhanced if the API provides more detailed job information
+     */
+    fun getJobsForCurrentWorker(): List<Job> {
+        val currentWorkerId = workerIdManager.getCurrentWorkerId()
+        val currentState = _state.value
+        
+        return if (currentState is MainState.Success && currentWorkerId != null) {
+            // For now, show all jobs since Job model doesn't have worker assignment info
+            // This could be enhanced if the API provides more detailed job information
+            currentState.jobs.also { filteredJobs ->
+                Log.d(TAG, "🔍 Showing ${filteredJobs.size} jobs (Job model doesn't have worker assignment info)")
+            }
+        } else {
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get workers filtered to show only current device
+     */
+    fun getCurrentWorker(): List<Worker> {
+        val currentWorkerId = workerIdManager.getCurrentWorkerId()
+        val currentState = _state.value
+        
+        return if (currentState is MainState.Success && currentWorkerId != null) {
+            currentState.workers.filter { worker ->
+                worker.id == currentWorkerId
+            }.also { filteredWorkers ->
+                Log.d(TAG, "🔍 Filtered ${filteredWorkers.size} workers for current device: $currentWorkerId")
+            }
+        } else {
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get activity filtered by current worker ID
+     * Since Activity model is basic, we'll create synthetic activity from jobs and workers
+     */
+    fun getActivityForCurrentWorker(): List<Activity> {
+        val currentWorkerId = workerIdManager.getCurrentWorkerId()
+        val currentState = _state.value
+        
+        return if (currentState is MainState.Success && currentWorkerId != null) {
+            val syntheticActivity = mutableListOf<Activity>()
+            
+            // Add real activity if it contains worker ID
+            val realActivity = currentState.activity.filter { activity ->
+                activity.details.contains(currentWorkerId) ||
+                activity.action.contains(currentWorkerId) ||
+                activity.type.contains(currentWorkerId)
+            }
+            syntheticActivity.addAll(realActivity)
+            
+            // Create synthetic activity from current worker status
+            val currentWorker = currentState.workers.find { it.id == currentWorkerId }
+            if (currentWorker != null) {
+                syntheticActivity.add(
+                    Activity(
+                        timestamp = currentWorker.lastSeen,
+                        type = "worker_status",
+                        action = "worker_heartbeat",
+                        details = "Worker ${currentWorker.id} is ${currentWorker.status}. Tasks completed: ${currentWorker.totalTasksCompleted}, failed: ${currentWorker.totalTasksFailed}"
+                    )
+                )
+                
+                // Add current task info if available
+                if (currentWorker.currentTaskId != null) {
+                    syntheticActivity.add(
+                        Activity(
+                            timestamp = System.currentTimeMillis().toString(),
+                            type = "task_execution",
+                            action = "task_in_progress",
+                            details = "Worker ${currentWorker.id} is executing task ${currentWorker.currentTaskId}"
+                        )
+                    )
+                }
+            }
+            
+            // Add job progress information
+            currentState.jobs.forEach { job ->
+                if (job.completedTasks > 0) {
+                    syntheticActivity.add(
+                        Activity(
+                            timestamp = job.createdAt,
+                            type = "job_progress",
+                            action = "job_update",
+                            details = "Job ${job.id} progress: ${job.completedTasks}/${job.totalTasks} tasks completed (${job.status})"
+                        )
+                    )
+                }
+            }
+            
+            // Sort by timestamp (newest first)
+            syntheticActivity.sortedByDescending { it.timestamp }.also { filteredActivity ->
+                Log.d(TAG, "🔍 Created ${filteredActivity.size} activities for worker: $currentWorkerId (${realActivity.size} real + ${syntheticActivity.size - realActivity.size} synthetic)")
+            }
+        } else {
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get current worker ID for display
+     */
+    fun getCurrentWorkerId(): String? {
+        return workerIdManager.getCurrentWorkerId()
     }
 
     override fun onCleared() {

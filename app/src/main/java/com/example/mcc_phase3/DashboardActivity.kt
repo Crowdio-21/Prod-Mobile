@@ -19,6 +19,7 @@ import com.google.android.material.tabs.TabLayoutMediator
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.example.mcc_phase3.data.ConfigManager
+import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.data.repository.CrowdComputeRepository
 import com.example.mcc_phase3.data.models.Job
 import com.example.mcc_phase3.data.models.Worker
@@ -42,6 +43,8 @@ class DashboardActivity : AppCompatActivity() {
     private lateinit var refreshButton: Button
     private lateinit var settingsButton: Button
     private lateinit var statusTextView: TextView
+    private lateinit var workerIdTextView: TextView
+    private lateinit var workerIdInfoButton: Button
     private lateinit var viewPager: ViewPager2
     private lateinit var tabLayout: TabLayout
     private lateinit var resetCircuitButton: Button
@@ -49,6 +52,7 @@ class DashboardActivity : AppCompatActivity() {
     
     private lateinit var repository: CrowdComputeRepository
     private lateinit var dashboardPagerAdapter: DashboardPagerAdapter
+    private lateinit var workerIdManager: WorkerIdManager
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,10 +64,12 @@ class DashboardActivity : AppCompatActivity() {
         setContentView(R.layout.activity_dashboard)
         
         repository = CrowdComputeRepository(this)
+        workerIdManager = WorkerIdManager.getInstance(this)
         initializeViews()
         setupToolbar()
         setupViewPager()
         setupClickListeners()
+        updateWorkerIdDisplay()
         startPeriodicUpdates()
     }
     
@@ -132,6 +138,8 @@ class DashboardActivity : AppCompatActivity() {
         refreshButton = findViewById(R.id.refreshButton)
         settingsButton = findViewById(R.id.settingsButton)
         statusTextView = findViewById(R.id.statusTextView)
+        workerIdTextView = findViewById(R.id.workerIdTextView)
+        workerIdInfoButton = findViewById(R.id.workerIdInfoButton)
         viewPager = findViewById(R.id.viewPager)
         tabLayout = findViewById(R.id.tabLayout)
         resetCircuitButton = findViewById(R.id.resetCircuitButton)
@@ -172,12 +180,55 @@ class DashboardActivity : AppCompatActivity() {
             repository.resetCircuitBreakerManually()
             refreshDashboard()
         }
+        
+        workerIdInfoButton.setOnClickListener {
+            showWorkerIdInfo()
+        }
+    }
+    
+    private fun updateWorkerIdDisplay() {
+        try {
+            val workerId = workerIdManager.getOrGenerateWorkerId()
+            val shortWorkerId = if (workerId.length > 20) {
+                "${workerId.take(17)}..."
+            } else {
+                workerId
+            }
+            workerIdTextView.text = "Worker ID: $shortWorkerId"
+            Log.d(TAG, "Worker ID displayed: $workerId")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating worker ID display", e)
+            workerIdTextView.text = "Worker ID: Error"
+        }
+    }
+    
+    private fun showWorkerIdInfo() {
+        try {
+            val info = workerIdManager.getWorkerIdInfo()
+            val currentWorkerId = workerIdManager.getCurrentWorkerId()
+            
+            val infoText = buildString {
+                appendLine("🆔 Worker ID Information")
+                appendLine("Current ID: $currentWorkerId")
+                appendLine("Device ID: ${info.deviceId}")
+                appendLine("Generated: ${if (info.generatedAt > 0) java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(info.generatedAt)) else "Not generated"}")
+                appendLine("Has ID: ${info.hasWorkerId}")
+            }
+            
+            // Show in a simple dialog or update status
+            statusTextView.text = infoText
+            Log.d(TAG, "Worker ID info displayed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing worker ID info", e)
+            statusTextView.text = "Error getting worker ID info: ${e.message}"
+        }
     }
     
     private fun startPeriodicUpdates() {
         lifecycleScope.launch {
             while (true) {
                 refreshDashboard()
+                updateWorkerIdDisplay() // Also update worker ID periodically
                 delay(10000L) // Update every 10 seconds
             }
         }

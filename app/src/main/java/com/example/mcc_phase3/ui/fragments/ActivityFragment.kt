@@ -63,7 +63,15 @@ class ActivityFragment : Fragment() {
                     }
                     is MainState.Success -> {
                         binding.swipeRefresh.isRefreshing = false
-                        activityAdapter.submitList(state.activity)
+                        // Show only activity for this device
+                        val filteredActivity = viewModel.getActivityForCurrentWorker()
+                        activityAdapter.submitList(filteredActivity)
+                        
+                        // Update UI to show filtering info
+                        if (filteredActivity.isEmpty()) {
+                            // Show message that no activity for this device
+                            showError("No activity found for this device. Make sure the mobile worker is running and connected.")
+                        }
                     }
                     is MainState.Error -> {
                         binding.swipeRefresh.isRefreshing = false
