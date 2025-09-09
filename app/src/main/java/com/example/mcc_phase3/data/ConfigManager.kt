@@ -20,7 +20,7 @@ class ConfigManager private constructor(context: Context) {
         private const val KEY_STATISTICS_PORT = "statistics_port"
         
         // Default values
-        const val DEFAULT_FOREMAN_IP = "192.168.8.101"
+        const val DEFAULT_FOREMAN_IP = "10.10.2.17"
         const val DEFAULT_FOREMAN_PORT = 8000  // HTTP API port
         const val DEFAULT_WEBSOCKET_PORT = 9000  // WebSocket port
         const val DEFAULT_STATISTICS_PORT = 8000  // Same as foreman for now

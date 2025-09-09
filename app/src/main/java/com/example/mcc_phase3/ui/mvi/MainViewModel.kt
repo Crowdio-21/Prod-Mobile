@@ -98,9 +98,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val websocketStats = repository.getWebsocketStats()
                 Log.d(TAG, "📊 WebSocket stats result: ${if (websocketStats.isSuccess) "✅ Success" else "❌ Failed - ${websocketStats.exceptionOrNull()?.message}"}")
 
-                Log.d(TAG, "📊 Fetching activity...")
-                val activity = repository.getActivity()
-                Log.d(TAG, "📊 Activity result: ${if (activity.isSuccess) "✅ Success" else "❌ Failed - ${activity.exceptionOrNull()?.message}"}")
+//                Log.d(TAG, "📊 Fetching activity...")
+//                val activity = repository.getActivity()
+//                Log.d(TAG, "📊 Activity result: ${if (activity.isSuccess) "✅ Success" else "❌ Failed - ${activity.exceptionOrNull()?.message}"}")
 
                 // Core data requirement: stats, jobs, and workers must succeed
                 val success = stats.isSuccess && jobs.isSuccess && workers.isSuccess
@@ -112,7 +112,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         jobs = jobs.getOrNull() ?: emptyList(),
                         workers = workers.getOrNull() ?: emptyList(),
                         websocketStats = websocketStats.getOrNull(),
-                        activity = activity.getOrNull() ?: emptyList(),
+//                        activity = activity.getOrNull() ?: emptyList(),
+                        activity = emptyList(),
                         isWebSocketConnected = wsConnected
                     )
                     _state.value = successState
