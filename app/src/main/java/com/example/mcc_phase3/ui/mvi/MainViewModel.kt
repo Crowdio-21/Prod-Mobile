@@ -13,12 +13,14 @@ import com.example.mcc_phase3.data.repository.CrowdComputeRepository
 import com.example.mcc_phase3.data.websocket.WebSocketManager
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.utils.TaskProgressSimulator
 import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = CrowdComputeRepository(application)
     private val workerIdManager = WorkerIdManager.getInstance(application)
+    private val taskProgressSimulator = TaskProgressSimulator()
 
     private val _state = MutableLiveData<MainState>(MainState.Loading)
     val state: LiveData<MainState> = _state
@@ -300,14 +302,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 
                 // Add current task info if available
                 if (currentWorker.currentTaskId != null) {
-                    syntheticActivity.add(
-                        Activity(
-                            timestamp = System.currentTimeMillis().toString(),
-                            type = "task_execution",
-                            action = "task_in_progress",
-                            details = "Worker ${currentWorker.id} is executing task ${currentWorker.currentTaskId}"
+                    // Check if we have real-time progress for this task
+                    val taskProgress = taskProgressSimulator.getTaskProgress(currentWorker.currentTaskId)
+                    if (taskProgress != null) {
+                        syntheticActivity.add(
+                            Activity(
+                                timestamp = System.currentTimeMillis().toString(),
+                                type = "task_execution",
+                                action = "Task Executing",
+                                details = "Task ID: ${currentWorker.currentTaskId}",
+                                status = taskProgress.status,
+                                progress = taskProgress.progress,
+                                taskId = currentWorker.currentTaskId,
+                                executionTime = taskProgress.executionTime
+                            )
                         )
-                    )
+                    } else {
+                        // Fallback to static progress
+                        syntheticActivity.add(
+                            Activity(
+                                timestamp = System.currentTimeMillis().toString(),
+                                type = "task_execution",
+                                action = "Task Executing",
+                                details = "Task ID: ${currentWorker.currentTaskId}",
+                                status = "executing",
+                                progress = 65, // Simulate progress
+                                taskId = currentWorker.currentTaskId,
+                                executionTime = 2300L // Simulate 2.3 seconds
+                            )
+                        )
+                    }
                 }
             }
             
@@ -318,8 +342,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         Activity(
                             timestamp = job.createdAt,
                             type = "job_progress",
-                            action = "job_update",
+                            action = "Job Update",
                             details = "Job ${job.id} progress: ${job.completedTasks}/${job.totalTasks} tasks completed (${job.status})"
+                        )
+                    )
+                }
+            }
+            
+            // Add active tasks from the progress simulator
+            val activeTasks = taskProgressSimulator.getAllActiveTasks()
+            activeTasks.forEach { (taskId, taskProgress) ->
+                syntheticActivity.add(
+                    Activity(
+                        timestamp = taskProgress.startTime.toString(),
+                        type = "task_execution",
+                        action = when (taskProgress.status) {
+                            "executing" -> "Task Executing"
+                            "completed" -> "Task Completed"
+                            "failed" -> "Task Failed"
+                            else -> "Task ${taskProgress.status.capitalize()}"
+                        },
+                        details = "Task ID: $taskId",
+                        status = taskProgress.status,
+                        progress = taskProgress.progress,
+                        taskId = taskId,
+                        executionTime = taskProgress.executionTime
+                    )
+                )
+            }
+            
+            // Add some sample completed tasks for demonstration
+            if (currentWorker != null && currentWorker.totalTasksCompleted > 0) {
+                syntheticActivity.add(
+                    Activity(
+                        timestamp = (System.currentTimeMillis() - 30000).toString(), // 30 seconds ago
+                        type = "task_execution",
+                        action = "Task Completed",
+                        details = "Task ID: sample_task_001",
+                        status = "completed",
+                        progress = 100,
+                        taskId = "sample_task_001",
+                        executionTime = 1200L // 1.2 seconds
+                    )
+                )
+                
+                // Add a failed task example
+                if (currentWorker.totalTasksFailed > 0) {
+                    syntheticActivity.add(
+                        Activity(
+                            timestamp = (System.currentTimeMillis() - 60000).toString(), // 1 minute ago
+                            type = "task_execution",
+                            action = "Task Failed",
+                            details = "Task ID: sample_task_002 - Error: Connection timeout",
+                            status = "failed",
+                            progress = 100,
+                            taskId = "sample_task_002",
+                            executionTime = 5000L // 5 seconds before failure
                         )
                     )
                 }
@@ -339,6 +417,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun getCurrentWorkerId(): String? {
         return workerIdManager.getCurrentWorkerId()
+    }
+    
+    /**
+     * Get task progress simulator for real-time progress updates
+     */
+    fun getTaskProgressSimulator(): TaskProgressSimulator {
+        return taskProgressSimulator
     }
 
     override fun onCleared() {

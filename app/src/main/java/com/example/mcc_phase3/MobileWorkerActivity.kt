@@ -138,21 +138,19 @@ class MobileWorkerActivity : AppCompatActivity() {
     
     private fun testMobileWorker() {
         if (isBound) {
-            mobileWorkerService?.testWorker()
-            
-            // Also test task execution
+            // Test the new architecture components
             lifecycleScope.launch {
                 try {
                     val taskTestResult = mobileWorkerService?.testTaskExecution()
                     Log.d(TAG, "Task execution test result: $taskTestResult")
                     
                     if (taskTestResult != null) {
-                        val success = taskTestResult["success"] as? Boolean ?: false
-                        if (success) {
+                        val status = taskTestResult["status"] as? String
+                        if (status == "success") {
                             val result = taskTestResult["result"]
                             Log.d(TAG, "✅ Task execution test successful: $result")
                         } else {
-                            val error = taskTestResult["error"] as? String
+                            val error = taskTestResult["message"] as? String
                             Log.e(TAG, "❌ Task execution test failed: $error")
                         }
                     }
@@ -197,69 +195,80 @@ class MobileWorkerActivity : AppCompatActivity() {
         lifecycleScope.launch {
             if (isBound && mobileWorkerService != null) {
                 try {
-                    // Get detailed worker status
-                    val detailedStatus = mobileWorkerService?.getDetailedWorkerStatus()
+                    // Get worker status using the new architecture
+                    val workerStatus = mobileWorkerService?.getWorkerStatus()
                     
-                    if (detailedStatus != null) {
+                    if (workerStatus != null) {
                         // Update status
-                        val isRunning = detailedStatus["is_running"] as? Boolean ?: false
-                        val workerThreadAlive = detailedStatus["worker_thread_alive"] as? Boolean ?: false
-                        val status = detailedStatus["status"] as? Map<*, *>
+                        val isRunning = workerStatus["is_running"] as? Boolean ?: false
+                        val connection = workerStatus["connection"] as? Map<String, Any>
+                        val taskProcessor = workerStatus["task_processor"] as? Map<String, Any>
+                        val pythonExecutor = workerStatus["python_executor"] as? Map<String, Any>
+                        val workerId = workerStatus["worker_id"] as? String
                         
                         val statusText = buildString {
                             appendLine("🔄 Worker Status:")
                             appendLine("Service Running: $isRunning")
-                            appendLine("Thread Alive: $workerThreadAlive")
-                            appendLine("Connection: ${status?.get("status") ?: "Unknown"}")
-                            appendLine("Current Task: ${status?.get("current_task") ?: "None"}")
+                            appendLine("Worker ID: $workerId")
+                            appendLine("WebSocket Connected: ${connection?.get("is_connected") ?: false}")
+                            appendLine("Python Ready: ${pythonExecutor?.get("initialized") ?: false}")
+                            appendLine("Task Processor Ready: ${taskProcessor?.get("processor_initialized") ?: false}")
+                            appendLine("Current Task: ${taskProcessor?.get("current_task_id") ?: "None"}")
+                            appendLine("Is Busy: ${taskProcessor?.get("is_busy") ?: false}")
                         }
                         statusTextView.text = statusText
                         
                         // Update stats
-                        val stats = status?.get("stats") as? Map<*, *>
-                        if (stats != null) {
-                            val statsText = buildString {
-                                appendLine("📊 Worker Statistics:")
-                                appendLine("Tasks Completed: ${stats.get("tasks_completed")}")
-                                appendLine("Tasks Failed: ${stats.get("tasks_failed")}")
-                                appendLine("Total Execution Time: ${stats.get("total_execution_time")}s")
-                                appendLine("Uptime: ${stats.get("uptime_seconds")}s")
-                            }
-                            statsTextView.text = statsText
+                        val statsText = buildString {
+                            appendLine("📊 Worker Statistics:")
+                            appendLine("Python Version: ${pythonExecutor?.get("python_version") ?: "Unknown"}")
+                            appendLine("Platform: ${pythonExecutor?.get("platform") ?: "Unknown"}")
+                            appendLine("Reconnect Attempts: ${connection?.get("reconnect_attempts") ?: 0}")
+                            appendLine("WebSocket Running: ${connection?.get("is_running") ?: false}")
                         }
+                        statsTextView.text = statsText
                         
                         // Update mobile info
-                        val mobileInfo = detailedStatus["mobile_info"] as? Map<*, *>
+                        val mobileInfo = mobileWorkerService?.getMobileInfo()
                         if (mobileInfo != null) {
                             val mobileText = buildString {
                                 appendLine("📱 Device Information:")
-                                appendLine("Device ID: ${mobileInfo.get("device_id")}")
-                                appendLine("Platform: ${mobileInfo.get("platform")}")
-                                appendLine("Battery: ${mobileInfo.get("battery_level")}%")
-                                appendLine("Charging: ${mobileInfo.get("is_charging")}")
-                                appendLine("Network: ${mobileInfo.get("network_available")}")
+                                appendLine("Platform: ${mobileInfo["platform"]}")
+                                appendLine("Worker ID: ${mobileInfo["worker_id"]}")
+                                appendLine("Service Running: ${mobileInfo["service_running"]}")
                                 
-                                // Add worker ID info
-                                val workerIdInfo = mobileInfo.get("worker_id_info") as? Map<*, *>
-                                if (workerIdInfo != null) {
+                                // Add Python executor info
+                                val pythonInfo = mobileInfo["python_executor"] as? Map<String, Any>
+                                if (pythonInfo != null) {
                                     appendLine("")
-                                    appendLine("🆔 Worker ID Information:")
-                                    appendLine("Worker ID: ${workerIdInfo.get("workerId")}")
-                                    appendLine("Device ID: ${workerIdInfo.get("deviceId")}")
-                                    appendLine("Generated: ${workerIdInfo.get("generatedAt")}")
-                                    appendLine("Has ID: ${workerIdInfo.get("hasWorkerId")}")
+                                    appendLine("🐍 Python Executor:")
+                                    appendLine("Initialized: ${pythonInfo["initialized"]}")
+                                    appendLine("Python Version: ${pythonInfo["python_version"]}")
+                                    appendLine("Platform: ${pythonInfo["platform"]}")
+                                }
+                                
+                                // Add connection info
+                                val connInfo = mobileInfo["connection"] as? Map<String, Any>
+                                if (connInfo != null) {
+                                    appendLine("")
+                                    appendLine("🌐 Connection Status:")
+                                    appendLine("Connected: ${connInfo["is_connected"]}")
+                                    appendLine("Running: ${connInfo["is_running"]}")
+                                    appendLine("Reconnect Attempts: ${connInfo["reconnect_attempts"]}")
                                 }
                             }
                             mobileInfoTextView.text = mobileText
                         }
                         
-                        // Update logs
-                        val logs = detailedStatus["logs"] as? String
-                        if (logs != null && logs.isNotEmpty() && logs != "No log file found") {
-                            logsTextView.text = "📝 Recent Logs:\n${logs.takeLast(500)}"
-                        } else {
-                            logsTextView.text = "📝 Recent Logs:\nNo logs available"
+                        // Update logs - show recent status instead of file logs
+                        val logsText = buildString {
+                            appendLine("📝 Recent Status:")
+                            appendLine("Last Update: ${System.currentTimeMillis()}")
+                            appendLine("Worker Status: ${if (isRunning) "Running" else "Stopped"}")
+                            appendLine("Python Executor: ${if (pythonExecutor?.get("initialized") == true) "Ready" else "Not Ready"}")
+                            appendLine("WebSocket: ${if (connection?.get("is_connected") == true) "Connected" else "Disconnected"}")
                         }
+                        logsTextView.text = logsText
                     }
                     
                 } catch (e: Exception) {
