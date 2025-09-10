@@ -10,23 +10,24 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
-import android.os.Environment
 import android.os.IBinder
 import android.util.Log
-import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import com.chaquo.python.Python
-import com.chaquo.python.android.AndroidPlatform
 import com.example.mcc_phase3.R
+import com.example.mcc_phase3.communication.WorkerWebSocketClient
 import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.execution.PythonExecutor
+import com.example.mcc_phase3.execution.TaskProcessor
 import kotlinx.coroutines.*
-import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Android Service for managing the mobile worker
- * Integrates Python mobile worker with Android lifecycle
+ * Uses separated architecture:
+ * - WorkerWebSocketClient: Handles WebSocket communication
+ * - TaskProcessor: Handles task routing and processing
+ * - PythonExecutor: Handles only Python code execution via Chaquopy
  */
 class MobileWorkerService : Service() {
 
@@ -43,10 +44,10 @@ class MobileWorkerService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private lateinit var workerIdManager: WorkerIdManager
 
-    // Python modules
-    private var mobileWorkerModule: com.chaquo.python.PyObject? = null
-    private var workerInstance: com.chaquo.python.PyObject? = null
-    private var workerThread: Thread? = null
+    // New architecture components
+    private lateinit var webSocketClient: WorkerWebSocketClient
+    private lateinit var taskProcessor: TaskProcessor
+    private lateinit var pythonExecutor: PythonExecutor
 
     inner class LocalBinder : Binder() {
         fun getService(): MobileWorkerService = this@MobileWorkerService
@@ -57,7 +58,7 @@ class MobileWorkerService : Service() {
         Log.d(TAG, "Service created")
         workerIdManager = WorkerIdManager.getInstance(this)
         createNotificationChannel()
-        initializePython()
+        initializeComponents()
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -94,6 +95,7 @@ class MobileWorkerService : Service() {
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
         stopWorker()
+        cleanupComponents()
         serviceScope.cancel()
     }
 
@@ -159,128 +161,109 @@ class MobileWorkerService : Service() {
         }
     }
 
-//    /**
-//     * Initialize Python environment
-//     */
-//    private fun initializePython() {
-//        try {
-//            if (!Python.isStarted()) {
-//                Python.start(AndroidPlatform(this))
-//            }
-//
-//            val py = Python.getInstance()
-//            mobileWorkerModule = py.getModule("mobile_worker")
-//
-//            Log.d(TAG, "Python initialized successfully")
-//        } catch (e: Exception) {
-//            Log.e(TAG, "Failed to initialize Python", e)
-//        }
-//    }
+    /**
+     * Initialize all components
+     */
+    private fun initializeComponents() {
+        try {
+            Log.d(TAG, "Initializing components...")
+            
+            // Initialize Python executor
+            pythonExecutor = PythonExecutor(this)
+            
+            // Initialize task processor
+            taskProcessor = TaskProcessor(this)
+            
+            // Initialize WebSocket client
+            webSocketClient = WorkerWebSocketClient(this)
+            
+            Log.d(TAG, "✅ All components initialized successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to initialize components", e)
+        }
+    }
 
-//    /**
-//     * Start the mobile worker
-//     */
-//    fun startWorker(foremanUrl: String = "ws://192.168.8.101:9000") {
-//        if (isRunning.get()) {
-//            Log.w(TAG, "Worker is already running")
-//            return
-//        }
-//
-//        serviceScope.launch {
-//            try {
-//                Log.d(TAG, "Starting mobile worker...")
-//                Log.d(TAG, "Foreman URL: $foremanUrl")
-//
-//                // Get or generate persistent worker ID
-//                val workerId = workerIdManager.getOrGenerateWorkerId()
-//                Log.d(TAG, "Worker ID: $workerId")
-//
-//                // Create worker instance
-//                Log.d(TAG, "Creating worker instance...")
-//                workerInstance = mobileWorkerModule?.callAttr(
-//                    "create_mobile_worker",
-//                    workerId,
-//                    foremanUrl
-//                )
-//                Log.d(TAG, "Worker instance created successfully")
-//
-//                if (workerInstance != null) {
-//                    isRunning.set(true)
-//                    updateNotification("Mobile Worker Service", "Worker connected: $workerId")
-//
-//                    // Start worker in a separate thread to avoid blocking the service
-//                    workerThread = Thread {
-//                        try {
-//                            Log.d(TAG, "Starting worker in background thread")
-//                            Log.d(TAG, "Worker instance: $workerInstance")
-//
-//                            // Call start_sync method
-//                            val result = workerInstance?.callAttr("start_sync")
-//                            Log.d(TAG, "Worker start_sync result: $result")
-//
-//                        } catch (e: Exception) {
-//                            Log.e(TAG, "Worker thread error", e)
-//                            Log.e(TAG, "Worker thread error details: ${e.message}")
-//                            e.printStackTrace()
-//                            isRunning.set(false)
-//                        }
-//                    }
-//                    workerThread?.start()
-//
-//                    Log.d(TAG, "Mobile worker started successfully in background thread")
-//                } else {
-//                    Log.e(TAG, "Failed to create worker instance")
-//                }
-//
-//            } catch (e: Exception) {
-//                Log.e(TAG, "Failed to start worker", e)
-//                isRunning.set(false)
-//            }
-//        }
-//    }
-//
-//    /**
-//     * Stop the mobile worker
-//     */
-//    fun stopWorker() {
-//        if (!isRunning.get()) {
-//            Log.w(TAG, "Worker is not running")
-//            return
-//        }
-//
-//        try {
-//            Log.d(TAG, "Stopping mobile worker...")
-//
-//            // Stop the worker gracefully
-//            workerInstance?.callAttr("stop")
-//
-//            // Stop the worker thread
-//            workerThread?.interrupt()
-//            workerThread = null
-//
-//            // Disconnect the worker
-//            workerInstance?.callAttr("disconnect")
-//            workerInstance = null
-//            isRunning.set(false)
-//
-//            Log.d(TAG, "Mobile worker stopped successfully")
-//
-//        } catch (e: Exception) {
-//            Log.e(TAG, "Failed to stop worker", e)
-//        }
-//    }
+    /**
+     * Start the mobile worker
+     */
+    fun startWorker(foremanUrl: String = "ws://192.168.8.101:9000") {
+        if (isRunning.get()) {
+            Log.w(TAG, "Worker is already running")
+            return
+        }
 
-//    /**
-//     * Get worker status
-//     */
-//    fun getWorkerStatus(): Map<String, Any>? {
-//        return try {
-//            workerInstance?.callAttr("get_status")?.toMap()
-//        } catch (e: Exception) {
-//            Log.e(TAG, "Failed to get worker status", e)
-//            null
-//        }
-//    }
+        serviceScope.launch {
+            try {
+                Log.d(TAG, "Starting mobile worker...")
+                Log.d(TAG, "Foreman URL: $foremanUrl")
+
+                // Get or generate persistent worker ID
+                val workerId = workerIdManager.getOrGenerateWorkerId()
+                Log.d(TAG, "Worker ID: $workerId")
+
+                // Connect to WebSocket
+                val connected = webSocketClient.connect(foremanUrl)
+                
+                if (connected) {
+                    isRunning.set(true)
+                    updateNotification("Mobile Worker Service", "Worker connected: $workerId")
+                    Log.d(TAG, "✅ Mobile worker started successfully")
+                } else {
+                    Log.e(TAG, "❌ Failed to connect to WebSocket")
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to start worker", e)
+                isRunning.set(false)
+            }
+        }
+    }
+    /**
+     * Stop the mobile worker
+     */
+    fun stopWorker() {
+        if (!isRunning.get()) {
+            Log.w(TAG, "Worker is not running")
+            return
+        }
+
+        try {
+            Log.d(TAG, "Stopping mobile worker...")
+
+            // Disconnect WebSocket
+            webSocketClient.disconnect()
+            
+            isRunning.set(false)
+            updateNotification("Mobile Worker Service", "Worker stopped")
+
+            Log.d(TAG, "✅ Mobile worker stopped successfully")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to stop worker", e)
+        }
+    }
+
+    /**
+     * Get worker status
+     */
+    fun getWorkerStatus(): Map<String, Any>? {
+        return try {
+            val connectionStatus = webSocketClient.getConnectionStatus()
+            val taskStatus = taskProcessor.getCurrentTaskStatus()
+            val pythonInfo = pythonExecutor.getEnvironmentInfo()
+            
+            mapOf<String, Any>(
+                "is_running" to isRunning.get(),
+                "connection" to connectionStatus,
+                "task_processor" to taskStatus,
+                "python_executor" to pythonInfo,
+                "worker_id" to (workerIdManager.getCurrentWorkerId() ?: "unknown")
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get worker status", e)
+            null
+        }
+    }
 
     /**
      * Check if worker is running
@@ -320,11 +303,11 @@ class MobileWorkerService : Service() {
     /**
      * Test task execution functionality
      */
-    fun testTaskExecution(): Map<String, Any>? {
+    suspend fun testTaskExecution(): Map<String, Any>? {
         return try {
             Log.d(TAG, "Testing task execution...")
 
-            val testResult = workerInstance?.callAttr("test_task_execution")?.toMap()
+            val testResult = taskProcessor.testTaskProcessing()
             Log.d(TAG, "Task execution test result: $testResult")
 
             testResult
@@ -384,50 +367,75 @@ class MobileWorkerService : Service() {
      */
     fun getMobileInfo(): Map<String, Any>? {
         return try {
-            workerInstance?.callAttr("get_detailed_device_info")?.toMap()
+            val pythonInfo = pythonExecutor.getEnvironmentInfo()
+            val connectionStatus = webSocketClient.getConnectionStatus()
+            
+            mapOf<String, Any>(
+                "platform" to "android",
+                "python_executor" to pythonInfo,
+                "connection" to connectionStatus,
+                "worker_id" to (workerIdManager.getCurrentWorkerId() ?: "unknown"),
+                "service_running" to isRunning.get()
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get mobile info", e)
             null
         }
     }
+    
+    /**
+     * Send immediate heartbeat for testing
+     */
+    fun sendImmediateHeartbeat() {
+        try {
+            webSocketClient.sendImmediateHeartbeat()
+            Log.d(TAG, "Immediate heartbeat sent")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send immediate heartbeat", e)
+        }
+    }
+    
+    /**
+     * Test complete task flow
+     */
+    suspend fun testCompleteTaskFlow(): Map<String, Any>? {
+        return try {
+            Log.d(TAG, "Testing complete task flow...")
+            
+            val webSocketTest = webSocketClient.testWebSocket()
+            val taskProcessorTest = taskProcessor.testTaskProcessing()
+            
+            val isSuccess = webSocketTest["status"] == "success" && 
+                           taskProcessorTest["status"] == "success"
+            
+            mapOf<String, Any>(
+                "status" to if (isSuccess) "success" else "error",
+                "message" to if (isSuccess) "Complete task flow test passed" else "Complete task flow test failed",
+                "websocket_test" to webSocketTest,
+                "task_processor_test" to taskProcessorTest
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Complete task flow test failed", e)
+            mapOf<String, Any>(
+                "status" to "error",
+                "message" to "Complete task flow test failed: ${e.message ?: "Unknown error"}",
+                "error" to e.toString()
+            )
+        }
+    }
+    
+    /**
+     * Cleanup all components
+     */
+    private fun cleanupComponents() {
+        try {
+            Log.d(TAG, "Cleaning up components...")
+            webSocketClient.cleanup()
+            taskProcessor.cleanup()
+            pythonExecutor.cleanup()
+            Log.d(TAG, "✅ All components cleaned up")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during cleanup", e)
+        }
+    }
 }
-//    /**
-//     * Get worker logs
-//     */
-//    fun getWorkerLogs(): String? {
-//        return try {
-//            // Read the log file if it exists
-//            val logFile = File(Environment.getExternalStorageDirectory(), "CrowdCompute/logs/worker_${workerInstance?.callAttr("config", "worker_id")?.toString()}.log")
-//            if (logFile.exists()) {
-//                logFile.readText()
-//            } else {
-//                "No log file found"
-//            }
-//        } catch (e: Exception) {
-//            Log.e(TAG, "Error reading logs: ${e.message}")
-//            "Error reading logs: ${e.message}"
-//        }
-//    }
-//
-//    /**
-//     * Get worker status with detailed info
-//     */
-//    fun getDetailedWorkerStatus(): Map<String, Any>? {
-//        return try {
-//            val status = getWorkerStatus()
-//            val mobileInfo = getMobileInfo()
-//            val logs = getWorkerLogs()
-//
-//            mapOf(
-//                "status" to (status ?: "No status available"),
-//                "mobile_info" to (mobileInfo ?: "No mobile info available"),
-//                "logs" to (logs ?: "No logs available"),
-//                "is_running" to isRunning.get(),
-//                "worker_thread_alive" to (workerThread?.isAlive ?: false)
-//            )
-//        } catch (e: Exception) {
-//            Log.e(TAG, "Failed to get detailed worker status", e)
-//            mapOf("error" to e.message.toString())
-//        }
-//    }
-//}
