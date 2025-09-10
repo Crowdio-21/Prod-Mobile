@@ -46,9 +46,9 @@ android {
     chaquopy {
         defaultConfig {
             version = "3.8"
-            pip {
-                install("websockets")
-            }
+//            pip {
+//                install("websockets")
+//            }
         }
     }
 }
