@@ -1,68 +1,93 @@
-# CrowdCompute Mobile App
+# CROWDio Mobile Worker - Android App
 
-A modern, professional Android application for monitoring and managing the CrowdCompute distributed computing framework. Built with Material Design 3, featuring a clean interface, dark mode support, and robust network resilience.
+A modern Android application that serves as both a monitoring client and a distributed computing worker for the CROWDio framework. Built with Material Design 3, featuring real-time task execution monitoring with horizontal progress indicators.
 
-## ✨ Features
+## 🚀 Features
 
-### 🎯 Core Functionality
-- **Real-time Dashboard**: Live monitoring of jobs, tasks, and workers
-- **Job Management**: Track job progress, completion status, and task distribution
-- **Worker Monitoring**: Monitor worker availability, performance, and task execution
-- **Activity Log**: View recent system events and activities
-- **Mobile Worker Control**: Direct control and monitoring of mobile worker services
+### 📱 Dual Functionality
+- **Monitoring Client**: Real-time dashboard for jobs, tasks, and workers
+- **Mobile Worker**: Execute distributed computing tasks using Python (Chaquopy)
+
+### 🎯 Core Capabilities
+- **Real-time Dashboard**: Live monitoring with connection status and system health
+- **Task Execution**: Python code execution with progress tracking
+- **Activity Monitoring**: Horizontal loading lines showing task execution progress
+- **Worker Management**: Start/stop mobile worker services
+- **Network Resilience**: Circuit breaker pattern with automatic retries
 
 ### 🎨 Modern UI/UX
-- **Material Design 3**: Latest Android design language with professional aesthetics
-- **Dark Mode Support**: Complete dark theme with automatic system detection
-- **Responsive Layout**: Optimized for various screen sizes and orientations
-- **Bottom Navigation**: Modern tab-based navigation for easy access
-- **Professional Design**: Clean, emoji-free interface suitable for enterprise use
-
-### 🔧 Advanced Features
-- **Network Resilience**: Robust error handling with circuit breaker pattern
-- **Automatic Retries**: Exponential backoff for network failures
-- **Connection Pooling**: Optimized network performance
-- **Real-time Updates**: WebSocket integration for live data
-- **Settings Management**: Configurable network endpoints and parameters
+- **Material Design 3**: Latest Android design language
+- **Dark Mode Support**: Complete dark theme with system detection
+- **Progress Indicators**: Horizontal loading bars for task execution
+- **Card-based Layout**: Clean, modern activity cards with status icons
+- **Real-time Updates**: Live progress tracking and status updates
 
 ## 🏗️ Architecture
 
-The app follows clean architecture principles with modern Android development patterns:
+### **Clean Architecture**
+- **Data Layer**: Repository pattern with API and WebSocket clients
+- **Domain Layer**: Use cases and business logic
+- **Presentation Layer**: MVI pattern with ViewModels and Fragments
+- **UI Layer**: Material 3 components with ViewBinding
 
-### **Data Layer**
-- **API Service**: Retrofit-based REST API client
-- **WebSocket Manager**: Real-time communication with CrowdCompute framework
-- **Repository Pattern**: Centralized data management with circuit breaker
-- **Config Manager**: Network configuration and endpoint management
+### **Key Components**
+- **MainViewModel**: Central state management with MVI pattern
+- **TaskProgressSimulator**: Real-time task execution progress tracking
+- **ActivityAdapter**: Enhanced adapter with progress indicators
+- **MobileWorkerService**: Background service for task execution
+- **PythonExecutor**: Chaquopy integration for Python code execution
 
-### **Domain Layer**
-- **Use Cases**: Business logic and data processing
-- **Models**: Data classes for jobs, workers, and system statistics
-- **Error Handling**: Comprehensive exception management
+## 📊 Task Execution Monitoring
 
-### **Presentation Layer**
-- **MVI Pattern**: Model-View-Intent for state management
-- **ViewModels**: Lifecycle-aware data holders
-- **Fragments**: Modular UI components
-- **Theme Manager**: Dynamic theme switching and persistence
+### **Horizontal Progress Indicators**
+The app features sophisticated progress tracking for task execution:
 
-### **UI Layer**
-- **Material 3**: Modern design system
+- **Real-time Progress Bars**: Horizontal loading lines showing 0-100% completion
+- **Status Icons**: Visual indicators (⚡ executing, ✅ completed, ❌ failed, ⏳ pending)
+- **Execution Time**: Live timing display during task execution
+- **Result Display**: Task results and error messages
+- **Card-based UI**: Modern card layout with progress sections
+
+### **Progress States**
+- **Executing**: Shows progress bar with percentage and execution time
+- **Completed**: Displays result and completion time
+- **Failed**: Shows error message and failure time
+- **Pending**: Indicates task is queued for execution
+
+## 🛠️ Technical Stack
+
+### **Android Framework**
+- **Kotlin**: Modern Android development
+- **Material 3**: Latest design system
+- **ViewBinding**: Type-safe view references
+- **Navigation Component**: Fragment navigation
+- **ViewModel & LiveData**: Lifecycle-aware data management
+
+### **Networking**
+- **Retrofit 2.9.0**: REST API client
+- **OkHttp 4.9.0**: HTTP client with interceptors
+- **Java-WebSocket**: Real-time WebSocket communication
+
+### **Python Integration**
+- **Chaquopy**: Python SDK for Android (Python 3.12.6)
+- **JSON Serialization**: Secure function serialization (no pickle)
+- **Task Execution**: Local Python code execution
+
+### **UI Components**
+- **RecyclerView**: Efficient list rendering with progress indicators
+- **CardView**: Modern card-based layouts
+- **ProgressBar**: Horizontal progress indicators
 - **ConstraintLayout**: Flexible, responsive layouts
-- **ViewPager2**: Smooth tab navigation
-- **RecyclerView**: Efficient list rendering
 
-## 🚀 Setup & Installation
+## 🚀 Quick Start
 
-### Prerequisites
-- **Android Studio**: Arctic Fox or later
-- **Android SDK**: API level 27+ (Android 8.1+)
-- **CrowdCompute Framework**: Running on your network
-- **Network Access**: Device must be able to reach the CrowdCompute server
+### **Prerequisites**
+- Android Studio Arctic Fox or later
+- Android SDK API level 27+ (Android 8.1+)
+- CROWDio framework running on your network
 
-### Quick Start
-
-1. **Clone the Repository**
+### **Installation**
+1. **Clone the repository**
    ```bash
    git clone <repository-url>
    cd MCC-Phase3
@@ -74,175 +99,150 @@ The app follows clean architecture principles with modern Android development pa
    - Wait for Gradle sync to complete
 
 3. **Configure Network Settings**
-   - Open `SettingsActivity` in the app
-   - Update the Foreman IP address to match your server
+   - Update the Foreman IP address in settings
    - Default ports: API (8000), WebSocket (9000)
 
 4. **Build and Run**
-   - Connect your Android device or start an emulator
+   - Connect Android device or start emulator
    - Click "Run" in Android Studio
-   - Grant necessary permissions when prompted
-
-### Network Configuration
-
-The app connects to CrowdCompute framework via:
-- **API Endpoint**: `http://[FOREMAN_IP]:8000` (FastAPI worker)
-- **WebSocket**: `ws://[FOREMAN_IP]:9000` (Foreman real-time updates)
-
-**Common IP Addresses:**
-- **Emulator**: `10.0.2.2` (localhost)
-- **Physical Device**: Your computer's local IP (e.g., `192.168.1.100`)
 
 ## 📱 Usage Guide
 
-### Dashboard Overview
+### **Dashboard Overview**
 - **Status Card**: Real-time connection status and system health
 - **Quick Actions**: Mobile worker control and settings access
-- **Tab Navigation**: Switch between Dashboard, Jobs, Workers, and Activity
+- **Tab Navigation**: Dashboard, Jobs, Workers, and Activity tabs
 
-### Theme Customization
-- **Light Mode**: Clean, professional light interface
-- **Dark Mode**: Modern dark theme for low-light environments
-- **System Mode**: Automatically follows device theme settings
-- **Toggle**: Tap the theme icon in the toolbar to switch themes
+### **Activity Monitoring**
+- **Real-time Progress**: Watch tasks execute with horizontal loading bars
+- **Status Tracking**: Visual indicators for task states
+- **Execution Details**: Task IDs, execution times, and results
+- **Filtered View**: Shows only activities for the current device
 
-### Network Management
-- **Circuit Breaker**: Automatic protection against cascading failures
-- **Retry Logic**: Intelligent retry with exponential backoff
-- **Connection Pooling**: Optimized network resource usage
-- **Error Handling**: User-friendly error messages and recovery
+### **Mobile Worker**
+- **Start/Stop**: Control worker service from the app
+- **Task Execution**: Automatic Python code execution
+- **Progress Tracking**: Real-time progress monitoring
+- **Result Display**: Task results and error handling
 
-## 🛠️ Technical Details
+## 🔧 Configuration
 
-### Dependencies
+### **Network Settings**
+Access via Settings to configure:
+- **Foreman IP Address**: Server endpoint configuration
+- **Port Settings**: API and WebSocket port customization
+- **Connection Testing**: Verify network connectivity
 
-#### **Networking**
-- **Retrofit 2.9.0**: REST API client
-- **OkHttp 4.9.0**: HTTP client with interceptors
-- **Java-WebSocket**: WebSocket communication
+### **Worker Configuration**
+- **Execution Modes**: Simulation, Python forwarding, or local execution
+- **Task Limits**: Maximum concurrent tasks and timeouts
+- **Heartbeat Interval**: Worker status update frequency
 
-#### **UI & Architecture**
-- **Material 3**: Modern design system
-- **Navigation Component**: Fragment navigation
-- **ViewModel & LiveData**: Lifecycle-aware data management
-- **ViewPager2**: Tab navigation
-- **ConstraintLayout**: Flexible layouts
+## 🎨 UI Features
 
-#### **JSON & Utilities**
-- **Gson**: JSON serialization/deserialization
-- **Coroutines**: Asynchronous programming
-- **SharedPreferences**: Theme and settings persistence
-
-### Network Resilience Features
-
-#### **Circuit Breaker Pattern**
-- **Threshold**: 5 consecutive failures
-- **Timeout**: 60 seconds recovery period
-- **Success Threshold**: 2 successful requests to close circuit
-- **Manual Reset**: Available for debugging
-
-#### **Retry Mechanism**
-- **Max Retries**: 3 attempts per request
-- **Backoff Strategy**: Exponential delay (1s, 2s, 4s)
-- **Timeout Configuration**: 30s connect, 60s read, 30s write
-
-#### **Connection Pooling**
-- **Pool Size**: 5 connections
-- **Keep-Alive**: 5 minutes
-- **Optimization**: Reduced connection overhead
-
-## 🎨 UI/UX Features
+### **Progress Indicators**
+- **Horizontal Loading Bars**: Smooth progress animation
+- **Status Icons**: Color-coded visual indicators
+- **Execution Timing**: Real-time execution time display
+- **Result Display**: Task results and error messages
 
 ### **Material Design 3**
-- **Color System**: Dynamic color palette with light/dark variants
-- **Typography**: Consistent text hierarchy and readability
-- **Components**: Modern buttons, cards, and navigation elements
+- **Dynamic Colors**: Adaptive color palette
+- **Typography**: Consistent text hierarchy
+- **Components**: Modern buttons, cards, and navigation
 - **Animations**: Smooth transitions and micro-interactions
 
-### **Dark Mode Implementation**
+### **Dark Mode**
 - **Automatic Detection**: Follows system theme preferences
 - **Manual Toggle**: Easy switching between themes
 - **Persistent Settings**: Remembers user preferences
 - **Consistent Theming**: All components support both themes
 
-### **Professional Design**
-- **Clean Interface**: Minimal, focused design without unnecessary elements
-- **Information Hierarchy**: Clear visual organization of data
-- **Accessibility**: Proper contrast ratios and touch targets
-- **Responsive Layout**: Adapts to different screen sizes
+## 🔍 Task Progress Simulation
 
-## 🔧 Configuration
+The app includes a sophisticated task progress simulator for demonstration:
 
-### **Settings Activity**
-Access via the settings button to configure:
-- **Foreman IP Address**: Server endpoint configuration
-- **Port Settings**: API and WebSocket port customization
-- **Connection Testing**: Verify network connectivity
-- **Reset Options**: Restore default settings
+### **Features**
+- **Real-time Progress**: Updates every 200ms
+- **Multiple Tasks**: Support for concurrent task simulation
+- **Success/Failure**: Configurable task outcomes
+- **Execution Timing**: Realistic execution time simulation
 
-### **Theme Management**
-- **Theme Persistence**: Settings saved across app sessions
-- **Dynamic Switching**: Instant theme application
-- **System Integration**: Respects device theme preferences
+### **Usage**
+```kotlin
+val simulator = TaskProgressSimulator()
+simulator.startTaskSimulation("task_001", shouldSucceed = true)
+```
 
 ## 🐛 Troubleshooting
 
 ### **Common Issues**
 
 #### **Connection Problems**
-- **Verify Server**: Ensure CrowdCompute framework is running
-- **Check IP Address**: Confirm correct Foreman IP in settings
-- **Network Access**: Test connectivity from device to server
-- **Firewall**: Ensure ports 8000 and 9000 are accessible
+- Verify CROWDio framework is running
+- Check Foreman IP address in settings
+- Test network connectivity from device to server
+- Ensure ports 8000 and 9000 are accessible
 
-#### **Build Errors**
-- **Gradle Sync**: Refresh project and sync dependencies
-- **SDK Version**: Ensure Android SDK 27+ is installed
-- **Dependencies**: Check all required libraries are included
+#### **Task Execution Issues**
+- Check Python/Chaquopy configuration
+- Verify task serialization format
+- Review execution timeout settings
+- Check device memory and performance
 
-#### **Runtime Issues**
-- **Permissions**: Grant necessary network permissions
-- **Memory**: Close other apps if experiencing slowdowns
-- **Theme Issues**: Try switching themes or restarting the app
+#### **Progress Display Issues**
+- Verify activity adapter configuration
+- Check task progress simulator status
+- Review UI layout and binding
+- Test with different task types
 
 ### **Debug Features**
-- **Circuit Breaker Status**: Monitor in dashboard status
-- **Network Logs**: Check Android Studio logcat for detailed errors
-- **Manual Reset**: Use reset button for circuit breaker issues
+- **Circuit Breaker Status**: Monitor in dashboard
+- **Network Logs**: Check Android Studio logcat
+- **Task Progress**: Real-time progress monitoring
+- **Manual Reset**: Reset circuit breaker if needed
+
+## 📊 Performance
+
+### **Optimizations**
+- **Efficient Rendering**: RecyclerView with progress indicators
+- **Memory Management**: Proper cleanup of resources
+- **Network Efficiency**: Connection pooling and retry logic
+- **Battery Optimization**: Smart task scheduling
+
+### **Monitoring**
+- **Real-time Metrics**: Task execution timing
+- **Progress Tracking**: Live progress updates
+- **Error Handling**: Comprehensive exception management
+- **Resource Usage**: Memory and CPU monitoring
 
 ## 🤝 Contributing
 
-We welcome contributions! Please follow these guidelines:
-
 ### **Code Standards**
-- **Kotlin Best Practices**: Follow official Kotlin conventions
+- **Kotlin Best Practices**: Follow official conventions
 - **Clean Architecture**: Maintain separation of concerns
 - **Material Design**: Adhere to Material 3 guidelines
 - **Error Handling**: Implement proper exception management
 
 ### **Development Process**
-1. **Fork** the repository
-2. **Create** a feature branch
-3. **Implement** your changes
-4. **Test** thoroughly on different devices
-5. **Submit** a pull request with detailed description
-
-### **Testing Requirements**
-- **Unit Tests**: For business logic and utilities
-- **UI Tests**: For critical user flows
-- **Integration Tests**: For API and WebSocket functionality
-- **Theme Testing**: Verify both light and dark modes
+1. Fork the repository
+2. Create a feature branch
+3. Implement changes with tests
+4. Submit pull request with description
 
 ## 📄 License
 
-This project is part of the CrowdCompute framework. Please refer to the main project license for usage terms.
+This project is part of the CROWDio framework. Please refer to the main project license for usage terms.
 
 ## 🔗 Related Projects
 
-- **CrowdCompute Framework**: Main distributed computing platform
+- **CROWDio Framework**: Main distributed computing platform
 - **Foreman Service**: Central coordination service
 - **Worker Services**: Task execution services
+- **Python Integration**: Chaquopy for Android
 
 ---
 
-**Built with ❤️ for the CrowdCompute community**
+**Built with ❤️ for the CROWDio community**
+
+*Featuring real-time task execution monitoring with horizontal progress indicators*
