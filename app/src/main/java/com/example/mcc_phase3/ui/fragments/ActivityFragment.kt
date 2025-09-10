@@ -1,6 +1,7 @@
 package com.example.mcc_phase3.ui.fragments
 
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -13,7 +14,9 @@ import com.example.mcc_phase3.ui.adapters.ActivityAdapter
 import com.example.mcc_phase3.ui.mvi.MainEvent
 import com.example.mcc_phase3.ui.mvi.MainState
 import com.example.mcc_phase3.ui.mvi.MainViewModel
+import com.example.mcc_phase3.utils.TaskProgressSimulator
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class ActivityFragment : Fragment() {
@@ -22,6 +25,11 @@ class ActivityFragment : Fragment() {
     
     private val viewModel: MainViewModel by activityViewModels()
     private lateinit var activityAdapter: ActivityAdapter
+    private lateinit var taskProgressSimulator: TaskProgressSimulator
+    
+    companion object {
+        private const val TAG = "ActivityFragment"
+    }
     
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -36,7 +44,9 @@ class ActivityFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         setupRecyclerView()
         setupSwipeRefresh()
+        setupTaskProgressSimulator()
         observeViewModel()
+        observeTaskProgress()
         viewModel.handleEvent(MainEvent.LoadData)
     }
     
@@ -51,6 +61,36 @@ class ActivityFragment : Fragment() {
     private fun setupSwipeRefresh() {
         binding.swipeRefresh.setOnRefreshListener {
             viewModel.handleEvent(MainEvent.RefreshData)
+        }
+    }
+    
+    private fun setupTaskProgressSimulator() {
+        taskProgressSimulator = viewModel.getTaskProgressSimulator()
+        
+        // Start a demo task simulation for demonstration
+        lifecycleScope.launch {
+            delay(1000) // Wait 1 second after fragment is created
+            Log.d(TAG, "🚀 Starting demo task simulation")
+            taskProgressSimulator.startTaskSimulation("demo_task_001", shouldSucceed = true)
+            
+            // Start another demo task after a delay
+            delay(2000)
+            taskProgressSimulator.startTaskSimulation("demo_task_002", shouldSucceed = false)
+        }
+    }
+    
+    private fun observeTaskProgress() {
+        lifecycleScope.launch {
+            taskProgressSimulator.taskProgressFlow.collect { taskProgressMap ->
+                Log.d(TAG, "📊 Task progress updated: ${taskProgressMap.size} active tasks")
+                
+                // Update the activity list with current progress
+                val currentState = viewModel.state.value
+                if (currentState is MainState.Success) {
+                    val filteredActivity = viewModel.getActivityForCurrentWorker()
+                    activityAdapter.submitList(filteredActivity)
+                }
+            }
         }
     }
     
@@ -92,6 +132,7 @@ class ActivityFragment : Fragment() {
     
     override fun onDestroyView() {
         super.onDestroyView()
+        taskProgressSimulator.cleanup()
         _binding = null
     }
 }
