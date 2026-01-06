@@ -46,9 +46,12 @@ android {
     chaquopy {
         defaultConfig {
             version = "3.8"
-//            pip {
-//                install("websockets")
-//            }
+            pip {
+                install("textblob")
+                install("nltk")
+//                install("torch==1.8.1")
+//                install("transformers==4.21.3", "--only-binary=all")
+            }
         }
     }
 }
