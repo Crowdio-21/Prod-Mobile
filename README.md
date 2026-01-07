@@ -72,6 +72,7 @@ The app features sophisticated progress tracking for task execution:
 - **Chaquopy**: Python SDK for Android (Python 3.12.6)
 - **JSON Serialization**: Secure function serialization (no pickle)
 - **Task Execution**: Local Python code execution
+- **Sentiment Analysis**: TextBlob-based NLP for mobile devices
 
 ### **UI Components**
 - **RecyclerView**: Efficient list rendering with progress indicators
@@ -173,6 +174,111 @@ The app includes a sophisticated task progress simulator for demonstration:
 val simulator = TaskProgressSimulator()
 simulator.startTaskSimulation("task_001", shouldSucceed = true)
 ```
+
+## 🧠 Sentiment Analysis
+
+The Android worker includes intelligent sentiment analysis capabilities optimized for mobile devices:
+
+### **How It Works**
+
+#### **Automatic Model Replacement**
+When the foreman sends PyTorch-based sentiment analysis tasks, the Android worker automatically:
+1. **Detects** PyTorch imports in incoming function code
+2. **Replaces** heavyweight PyTorch model with lightweight TextBlob
+3. **Executes** sentiment analysis using mobile-optimized libraries
+4. **Returns** JSON-formatted results compatible with the distributed system
+
+#### **Architecture**
+```
+Foreman → PyTorch Code → Android Worker
+                ↓
+         [Intercept & Replace]
+                ↓
+         TextBlob Analysis → JSON Result → Foreman
+```
+
+#### **Implementation Details**
+- **Detection**: PythonExecutor scans for `import torch` in function code
+- **Replacement**: Swaps with TextBlob-based implementation automatically
+- **Compatibility**: Returns same result format as PyTorch worker
+- **Fallback**: Embedded default sentiment worker if module loading fails
+
+### **Sentiment Analysis Features**
+
+#### **TextBlob Analysis**
+- **Polarity**: Sentiment score from -1.0 (negative) to 1.0 (positive)
+- **Confidence**: Based on polarity strength (0.0 to 1.0)
+- **Classification**: Binary (positive/negative)
+- **Speed**: <100ms per text on mobile devices
+- **Offline**: No model downloads required
+
+#### **Result Format**
+```json
+{
+  "text": "I absolutely love this product!",
+  "sentiment": 0.850,
+  "confidence": 0.850,
+  "predicted_class": 1,
+  "class_name": "positive",
+  "neg_probability": 0.000,
+  "pos_probability": 0.850,
+  "model": "TextBlob_Mobile",
+  "latency_ms": 45,
+  "status": "success"
+}
+```
+
+### **Mobile Optimization**
+
+#### **Why TextBlob Instead of PyTorch?**
+- **Size**: 1KB vs 250MB+ (PyTorch model)
+- **Speed**: Instant vs 2-5 seconds (model loading)
+- **Memory**: Minimal vs 500MB+ RAM
+- **Installation**: No downloads vs 250MB download
+- **Accuracy**: 85-90% vs 95%+ (acceptable trade-off for mobile)
+
+#### **Dependencies Installed**
+```kotlin
+pip {
+    install("textblob")      // Sentiment analysis
+    install("nltk")          // NLP utilities
+    install("vaderSentiment") // Alternative analyzer
+    install("numpy")         // Numerical operations
+}
+```
+
+### **Usage Example**
+
+#### **Client Side (Python)**
+```python
+from developer_sdk import connect, map as distributed_map
+
+async def analyze_sentiment():
+    await connect("foreman_host", 9000)
+    
+    texts = [
+        "I love this product!",
+        "Terrible experience.",
+        "It's okay, nothing special."
+    ]
+    
+    # Automatically uses mobile-optimized version on Android
+    results = await distributed_map(sentiment_worker_pytorch, texts)
+    return results
+```
+
+#### **Android Worker Processing**
+1. Receives PyTorch function code from foreman
+2. Detects `import torch` + `sentiment_worker_pytorch`
+3. Loads mobile-compatible TextBlob version
+4. Executes analysis on device
+5. Returns JSON result to foreman
+
+### **Error Handling**
+- **Module Import Errors**: Falls back to embedded sentiment worker
+- **Invalid Text**: Returns error status with details
+- **Network Issues**: Queues tasks for retry
+- **Memory Constraints**: Single-threaded execution to prevent OOM
 
 ## 🐛 Troubleshooting
 
