@@ -19,7 +19,7 @@
             android:layout_height="?attr/actionBarSize"
             android:paddingStart="16dp"
             android:paddingEnd="16dp"
-            app:title="CrowdCompute"
+            app:title="CrowdIO"
             app:titleTextColor="@color/text_primary"
             app:menu="@menu/dashboard_menu" />
 

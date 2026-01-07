@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">CrowdCompute</string>
+    <string name="app_name">CrowdIO</string>
     <string name="title_dashboard">Dashboard</string>
     <string name="title_jobs">Jobs</string>
     <string name="title_workers">Workers</string>
