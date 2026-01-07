@@ -49,8 +49,10 @@ android {
             pip {
                 install("textblob")
                 install("nltk")
-//                install("torch==1.8.1")
-//                install("transformers==4.21.3", "--only-binary=all")
+                install("vaderSentiment")
+                install("numpy")
+                install("requests")
+                install("aiohttp")
             }
         }
     }
@@ -76,6 +78,11 @@ dependencies {
     implementation(libs.gson)
     implementation(libs.websocket)
     implementation(libs.kotlinx.coroutines.android)
+    
+    // TensorFlow Lite for on-device ML inference
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
