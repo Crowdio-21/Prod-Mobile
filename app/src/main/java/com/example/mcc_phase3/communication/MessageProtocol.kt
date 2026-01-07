@@ -46,7 +46,25 @@ object MessageProtocol {
             put("type", MessageType.TASK_RESULT)
             put("data", JSONObject().apply {
                 put("task_id", taskId)
-                put("result", result)
+                // Handle result properly - if it's already a JSON string, parse it
+                // Otherwise convert to string
+                val resultValue = when (result) {
+                    is String -> {
+                        // Try to parse as JSON if it looks like JSON
+                        try {
+                            if (result.trim().startsWith("{") || result.trim().startsWith("[")) {
+                                JSONObject(result)
+                            } else {
+                                result
+                            }
+                        } catch (e: Exception) {
+                            result
+                        }
+                    }
+                    null -> JSONObject.NULL
+                    else -> result.toString()
+                }
+                put("result", resultValue)
                 put("execution_time", executionTime)
             })
             // Always include job_id field, even if null (backend expects this field)
