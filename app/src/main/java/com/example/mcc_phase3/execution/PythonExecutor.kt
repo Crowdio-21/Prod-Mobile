@@ -89,11 +89,18 @@ class PythonExecutor(private val context: Context) {
                 Log.d(TAG, "Executing Python code...")
 
                 // Handle Python code - check if it's base64 encoded or plain text
-                val pythonCode = if (isBase64Encoded(serializedCode)) {
+                var pythonCode = if (isBase64Encoded(serializedCode)) {
                     decodeBase64(serializedCode)
                 } else {
                     serializedCode // Use as plain text
                 }
+                
+                // Replace PyTorch sentiment function with TextBlob version for mobile
+                if (pythonCode.contains("import torch") && pythonCode.contains("sentiment_worker_pytorch")) {
+                    Log.d(TAG, "⚠️ Detected PyTorch sentiment function, replacing with mobile-compatible version")
+                    pythonCode = loadMobileSentimentWorker()
+                }
+                
                 Log.d(TAG, "Python code (first 100 chars): ${pythonCode.take(100)}...")
 
                 // Handle arguments - check if they're base64 encoded or plain text
@@ -242,6 +249,74 @@ class PythonExecutor(private val context: Context) {
     }
     
     /**
+     * Load mobile-compatible sentiment worker from Python file
+     */
+    private fun loadMobileSentimentWorker(): String {
+        return try {
+            // Load the sentiment_worker module from Python sources
+            val sentimentModule = pythonInstance?.getModule("sentiment_worker")
+            if (sentimentModule != null) {
+                Log.d(TAG, "✅ Loaded sentiment_worker module from Python sources")
+                // Read the module source code
+                val inspect = pythonInstance?.getModule("inspect")
+                val source = inspect?.callAttr("getsource", sentimentModule)?.toString()
+                source ?: getDefaultMobileSentimentWorker()
+            } else {
+                Log.w(TAG, "sentiment_worker module not found, using default")
+                getDefaultMobileSentimentWorker()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load sentiment_worker module: ${e.message}, using default")
+            getDefaultMobileSentimentWorker()
+        }
+    }
+    
+    /**
+     * Get default mobile sentiment worker code
+     */
+    private fun getDefaultMobileSentimentWorker(): String {
+        return """
+def sentiment_worker_pytorch(text):
+    import json
+    import time
+    
+    start = time.time()
+    try:
+        from textblob import TextBlob
+        blob = TextBlob(text)
+        polarity = blob.sentiment.polarity
+        predicted_class = 1 if polarity > 0 else 0
+        confidence = abs(polarity)
+        latency_ms = int((time.time() - start) * 1000)
+        
+        result = {
+            "text": text[:50] + "..." if len(text) > 50 else text,
+            "sentiment": round(polarity, 3),
+            "confidence": round(confidence, 3),
+            "predicted_class": predicted_class,
+            "class_name": "positive" if predicted_class == 1 else "negative",
+            "neg_probability": round(max(0, -polarity), 3),
+            "pos_probability": round(max(0, polarity), 3),
+            "model": "TextBlob_Mobile",
+            "latency_ms": latency_ms,
+            "status": "success"
+        }
+        return json.dumps(result)
+    except Exception as e:
+        latency_ms = int((time.time() - start) * 1000)
+        return json.dumps({
+            "text": text[:50] + "..." if len(text) > 50 else text,
+            "sentiment": 0.0,
+            "confidence": 0.0,
+            "latency_ms": latency_ms,
+            "status": "error",
+            "error": str(e),
+            "model": "TextBlob_Mobile"
+        })
+        """.trimIndent()
+    }
+    
+    /**
      * Extract function name from Python code
      */
     private fun extractFunctionName(code: String): String? {
@@ -338,8 +413,17 @@ class PythonExecutor(private val context: Context) {
                 }
             }
             
-            // Convert PyObject result to Java object
-            pyResult?.toJava(Any::class.java)
+            // Convert PyObject result to Java object/string
+            // If result is a string (JSON), return it as is
+            val result = pyResult?.toJava(Any::class.java)
+            
+            // If result is a string that looks like JSON, return it directly
+            // Otherwise convert to string representation
+            if (result is String) {
+                result
+            } else {
+                result?.toString() ?: "null"
+            }
             
         } catch (e: Exception) {
             Log.e(TAG, "Error executing function with arguments", e)
