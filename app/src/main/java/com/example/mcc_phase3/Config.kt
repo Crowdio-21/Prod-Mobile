@@ -7,7 +7,7 @@ package com.example.mcc_phase3
 object Config {
     
     // Foreman server configuration
-    const val FOREMAN_IP = "10.10.2.17"
+    const val FOREMAN_IP = "192.168.1.7"
     const val FOREMAN_PORT = "9000"
     
     // WebSocket URL for foreman
