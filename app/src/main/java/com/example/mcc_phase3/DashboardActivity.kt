@@ -73,6 +73,18 @@ class DashboardActivity : AppCompatActivity() {
         startPeriodicUpdates()
     }
     
+    override fun onResume() {
+        super.onResume()
+        // Force complete reset of ApiClient to clear any cached connections
+        com.example.mcc_phase3.data.api.ApiClient.reset(this)
+        // Reinitialize repository when returning from settings
+        // This ensures the new IP address is used
+        repository = CrowdComputeRepository(this)
+        // Reset circuit breaker when configuration changes
+        repository.manuallyResetCircuitBreaker()
+        refreshDashboard()
+    }
+    
     private fun setupToolbar() {
         setSupportActionBar(toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(false)

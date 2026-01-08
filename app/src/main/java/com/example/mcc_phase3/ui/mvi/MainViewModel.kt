@@ -18,7 +18,8 @@ import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = CrowdComputeRepository(application)
+    private var repository = CrowdComputeRepository(application)
+    private val configManager = ConfigManager.getInstance(application)
     private val workerIdManager = WorkerIdManager.getInstance(application)
     private val taskProgressSimulator = TaskProgressSimulator()
 
@@ -26,6 +27,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val state: LiveData<MainState> = _state
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val application = application
 
     companion object {
         private const val TAG = "MainViewModel"
@@ -78,6 +80,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadData() {
         Log.d(TAG, "📊 loadData() called")
+        
+        // Check if foreman is configured
+        if (!configManager.isForemanConfigured()) {
+            Log.w(TAG, "⚠️ Foreman not configured, showing error state")
+            _state.value = MainState.Error("Please configure Foreman IP address in Settings first")
+            return
+        }
+        
         viewModelScope.launch {
             try {
                 val startTime = System.currentTimeMillis()
@@ -147,7 +157,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshData() {
-        Log.d(TAG, "🔄 refreshData() called")
+        Log.d(TAG, "🔄 refreshData() called - recreating repository and resetting circuit breaker")
+        // Force complete reset of ApiClient
+        com.example.mcc_phase3.data.api.ApiClient.reset(application)
+        // Recreate repository to get fresh configuration
+        repository = CrowdComputeRepository(application)
+        // Reset circuit breaker for fresh start
+        repository.manuallyResetCircuitBreaker()
         loadData()
     }
 

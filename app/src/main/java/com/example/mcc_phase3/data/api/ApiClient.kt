@@ -42,29 +42,63 @@ object ApiClient {
             Log.d(TAG, "Gson configured with LOWER_CASE_WITH_UNDERSCORES naming policy")
         }
     
-    private val okHttpClient = OkHttpClient.Builder()
-        .addInterceptor(HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
-            Log.d(TAG, "HTTP logging interceptor set to BODY level")
-        })
-        .addInterceptor(RetryInterceptor())
-        .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .writeTimeout(WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .connectionPool(okhttp3.ConnectionPool(5, 5, TimeUnit.MINUTES))
-        .build()
-        .also {
-            Log.d(TAG, "OkHttpClient configured with enhanced settings")
-        }
-    
     private var retrofit: Retrofit? = null
     private var apiService: ApiService? = null
     private var currentBaseUrl: String? = null
+    private var okHttpClientInstance: OkHttpClient? = null
+    
+    /**
+     * Force complete reset of ApiClient
+     * Call this when configuration changes (e.g., new IP address set)
+     */
+    fun reset(context: Context) {
+        Log.d(TAG, "🔄 Resetting ApiClient completely")
+        clearOkHttpClient()
+        retrofit = null
+        apiService = null
+        currentBaseUrl = null
+        Log.d(TAG, "✅ ApiClient reset complete - will reinitialize on next getApiService() call")
+    }
+    
+    private fun clearOkHttpClient() {
+        okHttpClientInstance?.let { client ->
+            try {
+                // Close all idle connections
+                client.connectionPool.evictAll()
+                // Cancel all pending calls
+                client.dispatcher.cancelAll()
+                Log.d(TAG, "OkHttpClient connections cleared")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error clearing OkHttpClient connections", e)
+            }
+        }
+        okHttpClientInstance = null
+    }
+    
+    private fun getOrCreateOkHttpClient(): OkHttpClient {
+        if (okHttpClientInstance == null) {
+            okHttpClientInstance = OkHttpClient.Builder()
+                .addInterceptor(HttpLoggingInterceptor().apply {
+                    level = HttpLoggingInterceptor.Level.BODY
+                    Log.d(TAG, "HTTP logging interceptor set to BODY level")
+                })
+                .addInterceptor(RetryInterceptor())
+                .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .writeTimeout(WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .connectionPool(okhttp3.ConnectionPool(5, 5, TimeUnit.MINUTES))
+                .build()
+                .also {
+                    Log.d(TAG, "OkHttpClient configured with enhanced settings")
+                }
+        }
+        return okHttpClientInstance!!
+    }
     
     private fun createRetrofit(context: Context): Retrofit {
         return Retrofit.Builder()
             .baseUrl(getBaseUrl(context))
-            .client(okHttpClient)
+            .client(getOrCreateOkHttpClient())
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
             .also {
@@ -77,8 +111,10 @@ object ApiClient {
         
         // Recreate if base URL changed or not yet initialized
         if (apiService == null || currentBaseUrl != baseUrl) {
-            Log.d(TAG, "Base URL changed from $currentBaseUrl to $baseUrl, recreating Retrofit")
+            Log.d(TAG, "Base URL changed from $currentBaseUrl to $baseUrl, recreating Retrofit and OkHttpClient")
             currentBaseUrl = baseUrl
+            // Force recreation of OkHttpClient to clear cached connections
+            clearOkHttpClient()
             retrofit = createRetrofit(context)
             apiService = retrofit!!.create(ApiService::class.java).also {
                 Log.d(TAG, "ApiService instance created successfully")
@@ -90,16 +126,19 @@ object ApiClient {
     
     fun updateBaseUrl(context: Context, newBaseUrl: String) {
         Log.d(TAG, "updateBaseUrl() called: changing from ${getBaseUrl(context)} to $newBaseUrl")
+        // Force recreation of OkHttpClient to clear cached connections
+        clearOkHttpClient()
+        currentBaseUrl = newBaseUrl
         // This allows dynamic URL updates for different network configurations
         val newRetrofit = Retrofit.Builder()
             .baseUrl(newBaseUrl)
-            .client(okHttpClient)
+            .client(getOrCreateOkHttpClient())
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
         
         retrofit = newRetrofit
         apiService = retrofit!!.create(ApiService::class.java)
-        Log.d(TAG, "updateBaseUrl() - ApiService recreated with new URL")
+        Log.d(TAG, "updateBaseUrl() - ApiService and OkHttpClient recreated with new URL")
     }
     
     fun getBaseUrl(context: Context): String {

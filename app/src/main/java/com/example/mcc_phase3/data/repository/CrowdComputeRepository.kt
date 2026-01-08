@@ -104,7 +104,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             Log.d(TAG, "📊 Stats data: totalJobs=${stats.totalJobs}, totalTasks=${stats.totalTasks}, totalWorkers=${stats.totalWorkers}")
             ApiClient.logApiSuccess("/api/stats", 200)
             
-            resetCircuitBreaker()
+            resetCircuitBreakerOnSuccess()
             Result.success(stats)
         } catch (e: Exception) {
             handleApiError(e, "getStats")
@@ -129,7 +129,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             }
             ApiClient.logApiSuccess("/api/jobs", 200, jobs.size)
             
-            resetCircuitBreaker()
+            resetCircuitBreakerOnSuccess()
             Result.success(jobs)
         } catch (e: Exception) {
             handleApiError(e, "getJobs")
@@ -183,7 +183,19 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         }
     }
     
-    private fun resetCircuitBreaker() {
+    /**
+     * Manually reset the circuit breaker
+     * Call this when configuration changes (e.g., new IP address set)
+     */
+    fun manuallyResetCircuitBreaker() {
+        Log.d(TAG, "🔄 Manually resetting circuit breaker")
+        failureCount = 0
+        successCount = 0
+        lastFailureTime = 0L
+        isCircuitOpen = false
+    }
+    
+    private fun resetCircuitBreakerOnSuccess() {
         successCount++
         if (successCount >= CIRCUIT_BREAKER_SUCCESS_THRESHOLD) {
             Log.d(TAG, "✅ Circuit breaker reset after $successCount successful requests")
@@ -236,7 +248,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             Log.d(TAG, "💼 Job details: id=${job.id}, status=${job.status}, progress=${job.completedTasks}/${job.totalTasks}")
             ApiClient.logApiSuccess("/api/jobs/$jobId", 200)
             
-            resetCircuitBreaker()
+            resetCircuitBreakerOnSuccess()
             Result.success(job)
         } catch (e: Exception) {
             handleApiError(e, "getJob")
@@ -266,7 +278,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             }
             ApiClient.logApiSuccess("/api/workers", 200, workers.size)
             
-            resetCircuitBreaker()
+            resetCircuitBreakerOnSuccess()
             Result.success(workers)
         } catch (e: Exception) {
             handleApiError(e, "getWorkers")
@@ -313,7 +325,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             Log.d(TAG, "🔌 WebSocket stats: connected=${stats.connectedWorkers}, available=${stats.availableWorkers}")
             ApiClient.logApiSuccess("/api/websocket-stats", 200)
             
-            resetCircuitBreaker()
+            resetCircuitBreakerOnSuccess()
             Result.success(stats)
         } catch (e: Exception) {
             handleApiError(e, "getWebsocketStats")
