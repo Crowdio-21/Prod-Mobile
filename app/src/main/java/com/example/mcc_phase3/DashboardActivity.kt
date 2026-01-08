@@ -76,7 +76,7 @@ class DashboardActivity : AppCompatActivity() {
     private fun setupToolbar() {
         setSupportActionBar(toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(false)
-        supportActionBar?.title = "CrowdCompute"
+        supportActionBar?.title = "CrowdIO"
     }
     
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
