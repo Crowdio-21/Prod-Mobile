@@ -108,6 +108,9 @@ class MobileWorkerActivity : AppCompatActivity() {
     
     private fun bindService() {
         val intent = Intent(this, MobileWorkerService::class.java)
+        // Start the service explicitly to keep it running even when unbound
+        startService(intent)
+        // Then bind to communicate with it
         bindService(intent, connection, Context.BIND_AUTO_CREATE)
     }
     
@@ -296,14 +299,31 @@ class MobileWorkerActivity : AppCompatActivity() {
     
     override fun onResume() {
         super.onResume()
+        Log.d(TAG, "Activity resumed")
+        // Rebind if not bound
+        if (!isBound) {
+            bindService()
+        }
         updateUI()
+    }
+    
+    override fun onPause() {
+        super.onPause()
+        Log.d(TAG, "Activity paused")
+    }
+    
+    override fun onStop() {
+        super.onStop()
+        Log.d(TAG, "Activity stopped - service should continue running")
     }
     
     override fun onDestroy() {
         super.onDestroy()
+        Log.d(TAG, "Activity destroyed - unbinding service (service will continue running)")
         if (isBound) {
             unbindService(connection)
             isBound = false
         }
+        // Note: We do NOT stop the service here - it continues running in background
     }
 }

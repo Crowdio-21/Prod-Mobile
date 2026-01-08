@@ -55,9 +55,22 @@ class MobileWorkerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Service created")
+        Log.d(TAG, "=== MobileWorkerService Created ===")
         workerIdManager = WorkerIdManager.getInstance(this)
+        
+        // Create notification channel first
         createNotificationChannel()
+        
+        // Start as foreground service immediately to prevent being killed
+        if (hasNotificationPermission()) {
+            startForeground(
+                NOTIFICATION_ID,
+                createNotification("Mobile Worker Service", "Service initializing...")
+            )
+            Log.d(TAG, "Started as foreground service on onCreate")
+        }
+        
+        // Initialize components
         initializeComponents()
     }
 
@@ -66,7 +79,7 @@ class MobileWorkerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "Service started")
+        Log.d(TAG, "Service started with action: ${intent?.action}")
 
         when (intent?.action) {
             "START_WORKER" -> {
@@ -76,6 +89,10 @@ class MobileWorkerService : Service() {
 
             "STOP_WORKER" -> stopWorker()
             "GET_STATUS" -> getWorkerStatus()
+            else -> {
+                // Service restarted by system or no action specified
+                Log.d(TAG, "Service restarted - Worker was running: ${isRunning.get()}")
+            }
         }
 
         // Start as foreground service to prevent Android from killing it
@@ -88,6 +105,7 @@ class MobileWorkerService : Service() {
             Log.w(TAG, "Cannot start foreground service: POST_NOTIFICATIONS permission not granted")
         }
 
+        // START_STICKY ensures the service is restarted if killed by the system
         return START_STICKY
     }
 
@@ -97,6 +115,22 @@ class MobileWorkerService : Service() {
         stopWorker()
         cleanupComponents()
         serviceScope.cancel()
+    }
+
+    /**
+     * Called when the app is removed from recent tasks
+     * Keep the service running if worker is active
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.d(TAG, "Task removed - Worker running: ${isRunning.get()}")
+        
+        // Keep service running if worker is active
+        if (isRunning.get()) {
+            Log.d(TAG, "Restarting service to keep worker alive")
+            val restartServiceIntent = Intent(applicationContext, MobileWorkerService::class.java)
+            applicationContext.startService(restartServiceIntent)
+        }
     }
 
     private fun createNotificationChannel() {
