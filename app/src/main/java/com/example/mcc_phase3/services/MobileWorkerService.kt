@@ -192,11 +192,13 @@ class MobileWorkerService : Service() {
             return
         }
 
+        // Set running status immediately when worker starts
+        isRunning.set(true)
+        Log.d(TAG, "Starting mobile worker...")
+        Log.d(TAG, "Foreman URL: $foremanUrl")
+
         serviceScope.launch {
             try {
-                Log.d(TAG, "Starting mobile worker...")
-                Log.d(TAG, "Foreman URL: $foremanUrl")
-
                 // Get or generate persistent worker ID
                 val workerId = workerIdManager.getOrGenerateWorkerId()
                 Log.d(TAG, "Worker ID: $workerId")
@@ -205,16 +207,16 @@ class MobileWorkerService : Service() {
                 val connected = webSocketClient.connect(foremanUrl)
                 
                 if (connected) {
-                    isRunning.set(true)
                     updateNotification("Mobile Worker Service", "Worker connected: $workerId")
                     Log.d(TAG, "✅ Mobile worker started successfully")
                 } else {
                     Log.e(TAG, "❌ Failed to connect to WebSocket")
+                    updateNotification("Mobile Worker Service", "Worker running (connecting...)")
                 }
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to start worker", e)
-                isRunning.set(false)
+                updateNotification("Mobile Worker Service", "Worker error: ${e.message}")
             }
         }
     }
