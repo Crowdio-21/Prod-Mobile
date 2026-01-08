@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.mcc_phase3.R
 import com.example.mcc_phase3.communication.WorkerWebSocketClient
+import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.execution.PythonExecutor
 import com.example.mcc_phase3.execution.TaskProcessor
@@ -83,8 +84,13 @@ class MobileWorkerService : Service() {
 
         when (intent?.action) {
             "START_WORKER" -> {
-                val foremanUrl = intent.getStringExtra("foreman_url") ?: "ws://192.168.8.101:9000"
-                startWorker(foremanUrl)
+                val configManager = ConfigManager.getInstance(this)
+                val foremanUrl = intent.getStringExtra("foreman_url") ?: configManager.getForemanURL()
+                if (foremanUrl != null) {
+                    startWorker(foremanUrl)
+                } else {
+                    Log.w(TAG, "Cannot start worker: Foreman IP not configured")
+                }
             }
 
             "STOP_WORKER" -> stopWorker()
@@ -219,8 +225,14 @@ class MobileWorkerService : Service() {
 
     /**
      * Start the mobile worker
+     * @param foremanUrl The foreman WebSocket URL. If not provided, uses ConfigManager settings.
      */
-    fun startWorker(foremanUrl: String = "ws://192.168.8.101:9000") {
+    fun startWorker(foremanUrl: String? = null) {
+        val actualForemanUrl = foremanUrl ?: ConfigManager.getInstance(this).getForemanURL()
+        if (actualForemanUrl == null) {
+            Log.e(TAG, "Cannot start worker: Foreman IP not configured")
+            return
+        }
         if (isRunning.get()) {
             Log.w(TAG, "Worker is already running")
             return
@@ -229,7 +241,7 @@ class MobileWorkerService : Service() {
         // Set running status immediately when worker starts
         isRunning.set(true)
         Log.d(TAG, "Starting mobile worker...")
-        Log.d(TAG, "Foreman URL: $foremanUrl")
+        Log.d(TAG, "Foreman URL: $actualForemanUrl")
 
         serviceScope.launch {
             try {
@@ -238,7 +250,7 @@ class MobileWorkerService : Service() {
                 Log.d(TAG, "Worker ID: $workerId")
 
                 // Connect to WebSocket
-                val connected = webSocketClient.connect(foremanUrl)
+                val connected = webSocketClient.connect(actualForemanUrl)
                 
                 if (connected) {
                     updateNotification("Mobile Worker Service", "Worker connected: $workerId")
@@ -306,6 +318,19 @@ class MobileWorkerService : Service() {
      */
     fun isWorkerRunning(): Boolean {
         return isRunning.get()
+    }
+
+    /**
+     * Check if worker is connected to foreman
+     */
+    fun isWorkerConnected(): Boolean {
+        return try {
+            val connectionStatus = webSocketClient.getConnectionStatus()
+            connectionStatus["is_connected"] as? Boolean ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to check worker connection status", e)
+            false
+        }
     }
 
 //    /**

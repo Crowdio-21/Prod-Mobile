@@ -1,5 +1,10 @@
 package com.example.mcc_phase3.data.repository
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
 import android.util.Log
 import com.example.mcc_phase3.data.api.ApiClient
 import com.example.mcc_phase3.data.api.ApiService
@@ -7,6 +12,7 @@ import com.example.mcc_phase3.data.models.*
 import com.example.mcc_phase3.data.websocket.WebSocketManager
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.device.DeviceInfoManager
+import com.example.mcc_phase3.services.MobileWorkerService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
@@ -18,10 +24,7 @@ import java.net.UnknownHostException
 import java.io.IOException
 
 class CrowdComputeRepository(private val context: android.content.Context) {
-    private val apiService: ApiService = ApiClient.getApiService(context)
-    private val webSocketManager = WebSocketManager.getInstance() // ✅ Use singleton instance
-    private val deviceInfoManager = DeviceInfoManager(context) // Device information manager
-
+    
     companion object {
         private const val TAG = "CrowdComputeRepository"
         private const val CIRCUIT_BREAKER_THRESHOLD = 5  // Increased from 3 to 5
@@ -29,11 +32,55 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         private const val CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2 // Number of successes needed to close circuit
     }
     
+    private val apiService: ApiService = ApiClient.getApiService(context)
+    private val webSocketManager = WebSocketManager.getInstance() // ✅ Use singleton instance
+    private val deviceInfoManager = DeviceInfoManager(context) // Device information manager
+    private val configManager = ConfigManager.getInstance(context) // Configuration manager
+    
+    // Mobile worker service connection
+    private var mobileWorkerService: MobileWorkerService? = null
+    private var isServiceBound = false
+    
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? MobileWorkerService.LocalBinder
+            mobileWorkerService = binder?.getService()
+            isServiceBound = true
+            Log.d(TAG, "✅ Connected to MobileWorkerService")
+        }
+        
+        override fun onServiceDisconnected(name: ComponentName?) {
+            mobileWorkerService = null
+            isServiceBound = false
+            Log.d(TAG, "❌ Disconnected from MobileWorkerService")
+        }
+    }
+    
     // Circuit breaker state
     private var failureCount = 0
     private var successCount = 0
     private var lastFailureTime = 0L
     private var isCircuitOpen = false
+
+    init {
+        Log.d(TAG, "=== CrowdComputeRepository Initialized ===")
+        Log.d(TAG, "ApiService: ${apiService.javaClass.simpleName}")
+        Log.d(TAG, "WebSocketManager: ${webSocketManager.javaClass.simpleName}")
+        Log.d(TAG, "Base URL: ${ApiClient.getBaseUrl(context)}")
+        
+        // Try to bind to MobileWorkerService if it's running
+        tryBindToWorkerService()
+    }
+    
+    private fun tryBindToWorkerService() {
+        try {
+            val intent = Intent(context, MobileWorkerService::class.java)
+            context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+            Log.d(TAG, "Attempting to bind to MobileWorkerService")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not bind to MobileWorkerService: ${e.message}")
+        }
+    }
 
     init {
         Log.d(TAG, "=== CrowdComputeRepository Initialized ===")
@@ -93,6 +140,10 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         try {
             val configManager = ConfigManager.getInstance(context)
             val foremanUrl = configManager.getForemanHttpURL()
+            if (foremanUrl == null) {
+                Log.w(TAG, "⚠️ Cannot check connectivity: Foreman IP not configured")
+                return
+            }
             Log.d(TAG, "🌐 Checking connectivity to: $foremanUrl")
             
             // Try a simple ping test
@@ -115,7 +166,14 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             val timeSinceLastFailure = System.currentTimeMillis() - lastFailureTime
             if (timeSinceLastFailure < CIRCUIT_BREAKER_TIMEOUT_MS) {
                 Log.w(TAG, "🚫 Circuit breaker is OPEN, request blocked (${timeSinceLastFailure}ms since last failure)")
-                throw IOException("Circuit breaker is open - too many recent failures. Try again in ${(CIRCUIT_BREAKER_TIMEOUT_MS - timeSinceLastFailure) / 1000}s")
+                val waitTime = (CIRCUIT_BREAKER_TIMEOUT_MS - timeSinceLastFailure) / 1000
+                val foremanIp = configManager.getForemanIP()
+                val configMessage = if (foremanIp.isEmpty()) {
+                    "\n💡 TIP: Configure your Foreman IP in Settings first!"
+                } else {
+                    "\n💡 TIP: Verify Foreman at $foremanIp is running and accessible."
+                }
+                throw IOException("Circuit breaker is open - too many recent failures. Try again in ${waitTime}s.$configMessage")
             } else {
                 Log.d(TAG, "🔄 Circuit breaker timeout reached, attempting to close")
                 isCircuitOpen = false
@@ -272,6 +330,20 @@ class CrowdComputeRepository(private val context: android.content.Context) {
         webSocketManager.disconnect()
     }
 
+    fun isWebSocketConnected(): Boolean {
+        // Check if mobile worker service is connected (higher priority)
+        val workerConnected = mobileWorkerService?.isWorkerConnected() ?: false
+        if (workerConnected) {
+            Log.v(TAG, "🔌 isWebSocketConnected() - Mobile worker is connected: true")
+            return true
+        }
+        
+        // Fall back to WebSocketManager (dashboard monitoring connection)
+        val dashboardConnected = webSocketManager.isConnected()
+        Log.v(TAG, "🔌 isWebSocketConnected() - Dashboard connection: $dashboardConnected, Worker connection: $workerConnected")
+        return dashboardConnected
+    }
+
     fun addWebSocketListener(listener: WebSocketListener) {
         Log.d(TAG, "👂 addWebSocketListener() called: ${listener.javaClass.simpleName}")
         webSocketManager.addListener(listener)
@@ -280,12 +352,6 @@ class CrowdComputeRepository(private val context: android.content.Context) {
     fun removeWebSocketListener(listener: WebSocketListener) {
         Log.d(TAG, "👂 removeWebSocketListener() called: ${listener.javaClass.simpleName}")
         webSocketManager.removeListener(listener)
-    }
-
-    fun isWebSocketConnected(): Boolean {
-        val connected = webSocketManager.isConnected()
-        Log.v(TAG, "🔌 isWebSocketConnected() returning: $connected")
-        return connected
     }
 
     fun sendWebSocketMessage(message: String) {

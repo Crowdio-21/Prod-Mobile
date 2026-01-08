@@ -9,6 +9,7 @@ import android.os.IBinder
 import android.util.Log
 import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
@@ -116,7 +117,12 @@ class MobileWorkerActivity : AppCompatActivity() {
     
     private fun startMobileWorker() {
         if (isBound) {
-            mobileWorkerService?.startWorker(getForemanUrl())
+            val foremanUrl = getForemanUrl()
+            if (foremanUrl == null) {
+                Toast.makeText(this, "Please configure Foreman IP in Settings first", Toast.LENGTH_LONG).show()
+                return
+            }
+            mobileWorkerService?.startWorker(foremanUrl)
             // Update UI immediately after starting
             lifecycleScope.launch {
                 delay(100) // Small delay to let the service state update
@@ -130,7 +136,7 @@ class MobileWorkerActivity : AppCompatActivity() {
         }
     }
     
-    private fun getForemanUrl(): String {
+    private fun getForemanUrl(): String? {
         // Using ConfigManager for user-configurable settings
         val configManager = ConfigManager.getInstance(this)
         return configManager.getForemanURL()
