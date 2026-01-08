@@ -28,14 +28,14 @@
     <string name="tasks_failed">Tasks Failed</string>
     <string name="title_worker_control">Worker</string>
     <string name="configure_foreman">Configure Foreman IP</string>
-    <string name="foreman_ip_hint">e.g., 192.168.1.100</string>
+    <string name="foreman_ip_hint">Enter your Foreman server IP</string>
     <string name="foreman_port_hint">e.g., 9000</string>
     <string name="connect">Connect</string>
     <string name="save">Save</string>
     <string name="cancel">Cancel</string>
     <string name="configuration_success">Configuration Success</string>
     <string name="configuration_error">Configuration Error</string>
-    <string name="invalid_ip_format">Invalid IP address format. Please enter a valid IPv4 address (e.g., 192.168.1.100)</string>
+    <string name="invalid_ip_format">Invalid IP address format. Please enter a valid IPv4 address</string>
     <string name="invalid_port">Invalid port number. Please enter a number between 1 and 65535</string>
     <string name="ip_empty">IP address cannot be empty</string>
     <string name="foreman_note">Note: Make sure your foreman server is running and accessible from this device.</string>

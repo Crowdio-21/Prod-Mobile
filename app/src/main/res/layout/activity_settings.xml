@@ -37,7 +37,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="Configure Foreman IP and connection settings"
+                    android:text="Configure your Foreman server IP address and ports.\nMake sure the Foreman is running and accessible from your device."
                     android:textSize="14sp"
                     android:textColor="@android:color/darker_gray" />
 

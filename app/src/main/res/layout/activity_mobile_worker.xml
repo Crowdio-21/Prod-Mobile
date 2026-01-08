@@ -37,7 +37,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="CrowdCompute Mobile Worker for Android"
+                    android:text="CrowdIO Mobile Worker for Android"
                     android:textSize="14sp"
                     android:textColor="@android:color/darker_gray" />
 

@@ -122,7 +122,7 @@
                     android:id="@+id/foreman_url_text"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Foreman: ws://192.168.8.120:9000"
+                    android:text="Foreman: (configure in Settings)"
                     android:textSize="14sp"
                     android:layout_marginBottom="8dp" />
 
@@ -259,7 +259,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="This mobile device acts as a worker node in the CrowdCompute network. When you start the worker:"
+                    android:text="This mobile device acts as a worker node in the CrowdIO network. When you start the worker:"
                     android:textSize="14sp"
                     android:layout_marginBottom="8dp" />
 
