@@ -114,7 +114,11 @@ class MobileWorkerActivity : AppCompatActivity() {
     private fun startMobileWorker() {
         if (isBound) {
             mobileWorkerService?.startWorker(getForemanUrl())
-            updateUI()
+            // Update UI immediately after starting
+            lifecycleScope.launch {
+                delay(100) // Small delay to let the service state update
+                updateUI()
+            }
         } else {
             // Start service if not bound
             val intent = Intent(this, MobileWorkerService::class.java)
@@ -132,7 +136,11 @@ class MobileWorkerActivity : AppCompatActivity() {
     private fun stopMobileWorker() {
         if (isBound) {
             mobileWorkerService?.stopWorker()
-            updateUI()
+            // Update UI immediately after stopping
+            lifecycleScope.launch {
+                delay(100) // Small delay to let the service state update
+                updateUI()
+            }
         }
     }
     
