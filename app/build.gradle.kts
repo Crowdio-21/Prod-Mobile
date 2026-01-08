@@ -43,6 +43,16 @@ android {
         viewBinding = true
     }
     
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += setOf(
+                "**/libtensorflowlite_gpu_jni.so",
+                "**/libtensorflowlite_jni.so"
+            )
+        }
+    }
+    
     chaquopy {
         defaultConfig {
             version = "3.8"
