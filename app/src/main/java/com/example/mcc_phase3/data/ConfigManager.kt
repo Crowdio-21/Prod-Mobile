@@ -19,8 +19,9 @@ class ConfigManager private constructor(context: Context) {
         private const val KEY_WEBSOCKET_PORT = "websocket_port"
         private const val KEY_STATISTICS_PORT = "statistics_port"
         
-        // Default values
-        const val DEFAULT_FOREMAN_IP = "10.10.2.17"
+        // Default values - MUST be configured by user in Settings
+        // Empty string forces user to configure their own Foreman IP
+        const val DEFAULT_FOREMAN_IP = ""  // No default - user MUST configure in Settings
         const val DEFAULT_FOREMAN_PORT = 8000  // HTTP API port
         const val DEFAULT_WEBSOCKET_PORT = 9000  // WebSocket port
         const val DEFAULT_STATISTICS_PORT = 8000  // Same as foreman for now
@@ -84,18 +85,26 @@ class ConfigManager private constructor(context: Context) {
     
     /**
      * Get the complete foreman WebSocket URL
+     * @return WebSocket URL or null if Foreman IP is not configured
      */
-    fun getForemanURL(): String {
+    fun getForemanURL(): String? {
         val ip = getForemanIP()
+        if (ip.isEmpty()) {
+            return null
+        }
         val port = getWebSocketPort()  // Use WebSocket port for WebSocket URL
         return "ws://$ip:$port"
     }
     
     /**
      * Get the complete foreman HTTP API URL
+     * @return HTTP URL or null if Foreman IP is not configured
      */
-    fun getForemanHttpURL(): String {
+    fun getForemanHttpURL(): String? {
         val ip = getForemanIP()
+        if (ip.isEmpty()) {
+            return null
+        }
         val port = getForemanPort()  // Use HTTP port for HTTP API URL
         return "http://$ip:$port"
     }
@@ -119,9 +128,13 @@ class ConfigManager private constructor(context: Context) {
     
     /**
      * Get the complete Stat service URL
+     * @return Stat service URL or null if Foreman IP is not configured
      */
-    fun getStatServiceURL(): String {
+    fun getStatServiceURL(): String? {
         val ip = getForemanIP()
+        if (ip.isEmpty()) {
+            return null
+        }
         val port = getStatServicePort()
         return "http://$ip:$port"
     }
@@ -132,7 +145,8 @@ class ConfigManager private constructor(context: Context) {
     fun isForemanConfigured(): Boolean {
         val currentIP = getForemanIP()
         val currentPort = getForemanPort()
-        return currentIP != DEFAULT_FOREMAN_IP && 
+        return currentIP.isNotEmpty() && 
+               currentIP != DEFAULT_FOREMAN_IP && 
                isValidIPAddress(currentIP) && 
                isValidPort(currentPort)
     }
