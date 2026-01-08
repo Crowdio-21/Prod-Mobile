@@ -59,6 +59,7 @@ object ApiClient {
     
     private var retrofit: Retrofit? = null
     private var apiService: ApiService? = null
+    private var currentBaseUrl: String? = null
     
     private fun createRetrofit(context: Context): Retrofit {
         return Retrofit.Builder()
@@ -72,7 +73,12 @@ object ApiClient {
     }
     
     fun getApiService(context: Context): ApiService {
-        if (apiService == null) {
+        val baseUrl = getBaseUrl(context)
+        
+        // Recreate if base URL changed or not yet initialized
+        if (apiService == null || currentBaseUrl != baseUrl) {
+            Log.d(TAG, "Base URL changed from $currentBaseUrl to $baseUrl, recreating Retrofit")
+            currentBaseUrl = baseUrl
             retrofit = createRetrofit(context)
             apiService = retrofit!!.create(ApiService::class.java).also {
                 Log.d(TAG, "ApiService instance created successfully")
@@ -98,8 +104,14 @@ object ApiClient {
     
     fun getBaseUrl(context: Context): String {
         val baseUrl = ConfigManager.getInstance(context).getStatServiceURL()
-        Log.d(TAG, "getBaseUrl() called, returning: $baseUrl")
-        return baseUrl
+        return if (baseUrl != null) {
+            Log.d(TAG, "getBaseUrl() called, returning: $baseUrl")
+            baseUrl
+        } else {
+            Log.w(TAG, "⚠️ Foreman IP not configured, using placeholder URL")
+            Log.w(TAG, "💡 Please configure Foreman IP in Settings before using the app")
+            "http://unconfigured.local:8080"  // Placeholder that will fail gracefully
+        }
     }
     
     fun logApiCall(context: Context, endpoint: String, method: String = "GET") {
