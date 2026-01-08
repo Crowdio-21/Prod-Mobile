@@ -155,6 +155,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "🔌 connectWebSocket() called")
         val configManager = ConfigManager.getInstance(getApplication())
         val wsUrl = configManager.getForemanURL() // Using ConfigManager
+        if (wsUrl == null) {
+            Log.w(TAG, "⚠️ Cannot connect WebSocket: Foreman IP not configured")
+            return
+        }
         Log.d(TAG, "🔌 Connecting to: $wsUrl")
         repository.connectWebSocket(wsUrl)
     }
@@ -222,12 +226,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val currentState = _state.value
         Log.d(TAG, "🔌 Current state: ${currentState?.javaClass?.simpleName}")
 
-        if (currentState is MainState.Success) {
-            _state.value = currentState.copy(isWebSocketConnected = isConnected)
-            Log.d(TAG, "🔌 WebSocket status updated: $isConnected")
-        } else if (isConnected && currentState !is MainState.Loading) {
-            Log.d(TAG, "🔌 WebSocket connected but no success state yet - triggering loadData()")
-            loadData()
+        when (currentState) {
+            is MainState.Success -> {
+                _state.value = currentState.copy(isWebSocketConnected = isConnected)
+                Log.d(TAG, "🔌 WebSocket status updated in Success state: $isConnected")
+            }
+            is MainState.Error -> {
+                // Update error state with connection status too
+                val updatedState = MainState.Success(
+                    stats = null,
+                    jobs = emptyList(),
+                    workers = emptyList(),
+                    websocketStats = null,
+                    activity = emptyList(),
+                    isWebSocketConnected = isConnected
+                )
+                _state.value = updatedState
+                Log.d(TAG, "🔌 WebSocket status updated, moved from Error to Success state: $isConnected")
+            }
+            else -> {
+                if (isConnected) {
+                    Log.d(TAG, "🔌 WebSocket connected - triggering loadData()")
+                    loadData()
+                } else {
+                    // Create minimal state with connection status
+                    _state.value = MainState.Success(
+                        stats = null,
+                        jobs = emptyList(),
+                        workers = emptyList(),
+                        websocketStats = null,
+                        activity = emptyList(),
+                        isWebSocketConnected = isConnected
+                    )
+                    Log.d(TAG, "🔌 WebSocket disconnected - updated state: $isConnected")
+                }
+            }
         }
     }
 

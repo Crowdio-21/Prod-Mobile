@@ -159,6 +159,11 @@ class SettingsActivity : AppCompatActivity() {
             val foremanUrl = configManager.getForemanURL()
             val statsUrl = configManager.getStatServiceURL()
             
+            if (foremanUrl == null || statsUrl == null) {
+                statusTextView.text = "❌ Configuration incomplete\nPlease configure Foreman IP address first."
+                return
+            }
+            
             statusTextView.text = "Testing connections...\n" +
                     "Foreman WebSocket: $foremanUrl\n" +
                     "Stats HTTP: $statsUrl"

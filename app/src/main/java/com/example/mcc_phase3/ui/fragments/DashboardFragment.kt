@@ -101,20 +101,16 @@ class DashboardFragment : Fragment() {
                         Log.d(TAG, "✅ Success state - updating dashboard")
                         binding.swipeRefresh.isRefreshing = false
                         updateDashboard(state)
+                        // Update connection status
+                        Log.d(TAG, "🔌 Updating connection status: ${state.isWebSocketConnected}")
+                        updateConnectionStatus(state.isWebSocketConnected)
                     }
                     is MainState.Error -> {
                         Log.e(TAG, "❌ Error state: ${state.message}")
                         binding.swipeRefresh.isRefreshing = false
-                        // Handle error state
+                        // Show disconnected when in error state
+                        updateConnectionStatus(false)
                     }
-                }
-            }
-            
-            // Observe WebSocket connection status
-            viewModel.state.observe(viewLifecycleOwner) { state ->
-                if (state is MainState.Success) {
-                    Log.d(TAG, "🔌 Updating WebSocket connection status: ${state.isWebSocketConnected}")
-                    updateConnectionStatus(state.isWebSocketConnected)
                 }
             }
             
