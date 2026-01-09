@@ -371,6 +371,19 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
+     * Get Python version from Python executor
+     */
+    fun getPythonVersion(): String? {
+        return try {
+            val envInfo = pythonExecutor.getEnvironmentInfo()
+            envInfo["python_version"] as? String
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting Python version", e)
+            null
+        }
+    }
+    
+    /**
      * Cleanup resources
      */
     fun cleanup() {
