@@ -21,13 +21,50 @@ object MessageProtocol {
     }
     
     /**
-     * Create a worker ready message
+     * Create a worker ready message with device specifications
+     * Matches PC worker format with nested device_specs dictionary
      */
-    fun createWorkerReadyMessage(workerId: String): String {
+    fun createWorkerReadyMessage(
+        workerId: String,
+        deviceType: String = "Android",
+        osType: String = "Android",
+        osVersion: String? = null,
+        cpuModel: String? = null,
+        cpuCores: Int? = null,
+        cpuThreads: Int? = null,
+        cpuFrequencyMhz: Float? = null,
+        ramTotalMb: Float? = null,
+        ramAvailableMb: Float? = null,
+        gpuModel: String? = null,
+        batteryLevel: Float? = null,
+        isCharging: Boolean? = null,
+        networkType: String? = null,
+        pythonVersion: String? = null
+    ): String {
         return JSONObject().apply {
             put("type", MessageType.WORKER_READY)
             put("data", JSONObject().apply {
                 put("worker_id", workerId)
+                
+                // Create nested device_specs object matching PC worker format
+                put("device_specs", JSONObject().apply {
+                    put("device_type", deviceType)
+                    put("os_type", osType)
+                    
+                    // Optional fields - only include if not null
+                    osVersion?.let { put("os_version", it) }
+                    cpuModel?.let { put("cpu_model", it) }
+                    cpuCores?.let { put("cpu_cores", it) }
+                    cpuThreads?.let { put("cpu_threads", it) }
+                    cpuFrequencyMhz?.let { put("cpu_frequency_mhz", it) }
+                    ramTotalMb?.let { put("ram_total_mb", it) }
+                    ramAvailableMb?.let { put("ram_available_mb", it) }
+                    gpuModel?.let { put("gpu_model", it) }
+                    batteryLevel?.let { put("battery_level", it) }
+                    isCharging?.let { put("is_charging", it) }
+                    networkType?.let { put("network_type", it) }
+                    pythonVersion?.let { put("python_version", it) }
+                })
             })
             put("timestamp", System.currentTimeMillis())
         }.toString()
