@@ -16,12 +16,15 @@ class ConfigManager private constructor(context: Context) {
         private const val PREFS_NAME = "CrowdComputeConfig"
         private const val KEY_FOREMAN_IP = "foreman_ip"
         private const val KEY_FOREMAN_PORT = "foreman_port"
+        private const val KEY_WEBSOCKET_PORT = "websocket_port"
         private const val KEY_STATISTICS_PORT = "statistics_port"
         
-        // Default values
-        const val DEFAULT_FOREMAN_IP = "192.168.1.100"
-        const val DEFAULT_FOREMAN_PORT = 9000
-        const val DEFAULT_STATISTICS_PORT = 8000
+        // Default values - MUST be configured by user in Settings
+        // Empty string forces user to configure their own Foreman IP
+        const val DEFAULT_FOREMAN_IP = ""  // No default - user MUST configure in Settings
+        const val DEFAULT_FOREMAN_PORT = 8000  // HTTP API port
+        const val DEFAULT_WEBSOCKET_PORT = 9000  // WebSocket port
+        const val DEFAULT_STATISTICS_PORT = 8000  // Same as foreman for now
         
         @Volatile
         private var instance: ConfigManager? = null
@@ -66,12 +69,44 @@ class ConfigManager private constructor(context: Context) {
     }
     
     /**
-     * Get the complete foreman WebSocket URL
+     * Get the stored WebSocket port
      */
-    fun getForemanURL(): String {
+    fun getWebSocketPort(): Int {
+        return prefs.getInt(KEY_WEBSOCKET_PORT, DEFAULT_WEBSOCKET_PORT)
+    }
+    
+    /**
+     * Set the WebSocket port
+     */
+    fun setWebSocketPort(port: Int) {
+        Log.d(TAG, "Setting WebSocket port to: $port")
+        prefs.edit().putInt(KEY_WEBSOCKET_PORT, port).apply()
+    }
+    
+    /**
+     * Get the complete foreman WebSocket URL
+     * @return WebSocket URL or null if Foreman IP is not configured
+     */
+    fun getForemanURL(): String? {
         val ip = getForemanIP()
-        val port = getForemanPort()
+        if (ip.isEmpty()) {
+            return null
+        }
+        val port = getWebSocketPort()  // Use WebSocket port for WebSocket URL
         return "ws://$ip:$port"
+    }
+    
+    /**
+     * Get the complete foreman HTTP API URL
+     * @return HTTP URL or null if Foreman IP is not configured
+     */
+    fun getForemanHttpURL(): String? {
+        val ip = getForemanIP()
+        if (ip.isEmpty()) {
+            return null
+        }
+        val port = getForemanPort()  // Use HTTP port for HTTP API URL
+        return "http://$ip:$port"
     }
 
     
@@ -93,9 +128,13 @@ class ConfigManager private constructor(context: Context) {
     
     /**
      * Get the complete Stat service URL
+     * @return Stat service URL or null if Foreman IP is not configured
      */
-    fun getStatServiceURL(): String {
+    fun getStatServiceURL(): String? {
         val ip = getForemanIP()
+        if (ip.isEmpty()) {
+            return null
+        }
         val port = getStatServicePort()
         return "http://$ip:$port"
     }
@@ -106,7 +145,8 @@ class ConfigManager private constructor(context: Context) {
     fun isForemanConfigured(): Boolean {
         val currentIP = getForemanIP()
         val currentPort = getForemanPort()
-        return currentIP != DEFAULT_FOREMAN_IP && 
+        return currentIP.isNotEmpty() && 
+               currentIP != DEFAULT_FOREMAN_IP && 
                isValidIPAddress(currentIP) && 
                isValidPort(currentPort)
     }
@@ -152,8 +192,10 @@ class ConfigManager private constructor(context: Context) {
         return """
             Configuration Summary:
             - Foreman IP: ${getForemanIP()}
-            - Foreman Port: ${getForemanPort()}
-            - Foreman URL: ${getForemanURL()}
+            - Foreman Port (HTTP): ${getForemanPort()}
+            - WebSocket Port: ${getWebSocketPort()}
+            - Foreman HTTP URL: ${getForemanHttpURL()}
+            - Foreman WebSocket URL: ${getForemanURL()}
             - Stat Service IP: ${getForemanIP()}
             - Stat Service Port: ${getStatServicePort()}
             - Stat Service URL: ${getStatServiceURL()}

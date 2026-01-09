@@ -47,7 +47,7 @@
                         android:layout_weight="1"
                         android:layout_marginEnd="8dp"
                         android:text="Start Worker"
-                        android:backgroundTint="@color/connection_connected" />
+                        android:backgroundTint="@color/success" />
 
                     <Button
                         android:id="@+id/stop_worker_button"
@@ -56,7 +56,7 @@
                         android:layout_weight="1"
                         android:layout_marginStart="8dp"
                         android:text="Stop Worker"
-                        android:backgroundTint="@color/connection_disconnected"
+                        android:backgroundTint="@color/error"
                         android:enabled="false" />
 
                 </LinearLayout>
@@ -74,7 +74,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:text="@string/configure_foreman"
-                    android:backgroundTint="@android:color/holo_blue_dark" />
+                    android:backgroundTint="@color/primary" />
 
             </LinearLayout>
 
@@ -122,7 +122,7 @@
                     android:id="@+id/foreman_url_text"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Foreman: ws://192.168.8.120:9000"
+                    android:text="Foreman: (configure in Settings)"
                     android:textSize="14sp"
                     android:layout_marginBottom="8dp" />
 
@@ -130,9 +130,10 @@
                     android:id="@+id/connection_status_text"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="🔴 Disconnected"
+                    android:text="Disconnected"
                     android:textSize="16sp"
                     android:textStyle="bold"
+                    android:textColor="@color/error"
                     android:layout_marginBottom="16dp" />
 
             </LinearLayout>
@@ -258,7 +259,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="This mobile device acts as a worker node in the CrowdCompute network. When you start the worker:"
+                    android:text="This mobile device acts as a worker node in the CrowdIO network. When you start the worker:"
                     android:textSize="14sp"
                     android:layout_marginBottom="8dp" />
 

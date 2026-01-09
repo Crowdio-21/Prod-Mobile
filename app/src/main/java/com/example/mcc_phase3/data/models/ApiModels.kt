@@ -47,7 +47,11 @@ data class Activity(
     val timestamp: String,
     val type: String,
     val action: String,
-    val details: String
+    val details: String,
+    val status: String = "completed", // "pending", "executing", "completed", "failed"
+    val progress: Int = 100, // 0-100 percentage
+    val taskId: String? = null,
+    val executionTime: Long? = null // in milliseconds
 )
 
 data class WebsocketStats(

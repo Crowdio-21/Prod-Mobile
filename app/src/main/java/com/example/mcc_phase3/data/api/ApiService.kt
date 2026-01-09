@@ -24,6 +24,9 @@ interface ApiService {
     @GET("/api/websocket-stats")
     suspend fun getWebsocketStats(): WebsocketStats
 
+//    @GET("/api/activity")
+//    suspend fun getActivity(): List<Activity>
+
     // Use existing jobs endpoint to get recent activity
     @GET("/api/jobs")
     suspend fun getRecentJobs(

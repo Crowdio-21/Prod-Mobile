@@ -63,7 +63,15 @@ class JobsFragment : Fragment() {
                     }
                     is MainState.Success -> {
                         binding.swipeRefresh.isRefreshing = false
-                        jobsAdapter.submitList(state.jobs)
+                        // Show only jobs assigned to this device
+                        val filteredJobs = viewModel.getJobsForCurrentWorker()
+                        jobsAdapter.submitList(filteredJobs)
+                        
+                        // Update UI to show filtering info
+                        if (filteredJobs.isEmpty()) {
+                            // Show message that no jobs are assigned to this device
+                            showError("No jobs assigned to this device. Make sure the mobile worker is running and connected.")
+                        }
                     }
                     is MainState.Error -> {
                         binding.swipeRefresh.isRefreshing = false

@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.example.mcc_phase3.R
 import com.example.mcc_phase3.databinding.FragmentDashboardBinding
 import com.example.mcc_phase3.ui.adapters.ActivityAdapter
 import com.example.mcc_phase3.ui.mvi.MainEvent
@@ -100,20 +101,16 @@ class DashboardFragment : Fragment() {
                         Log.d(TAG, "✅ Success state - updating dashboard")
                         binding.swipeRefresh.isRefreshing = false
                         updateDashboard(state)
+                        // Update connection status
+                        Log.d(TAG, "🔌 Updating connection status: ${state.isWebSocketConnected}")
+                        updateConnectionStatus(state.isWebSocketConnected)
                     }
                     is MainState.Error -> {
                         Log.e(TAG, "❌ Error state: ${state.message}")
                         binding.swipeRefresh.isRefreshing = false
-                        // Handle error state
+                        // Show disconnected when in error state
+                        updateConnectionStatus(false)
                     }
-                }
-            }
-            
-            // Observe WebSocket connection status
-            viewModel.state.observe(viewLifecycleOwner) { state ->
-                if (state is MainState.Success) {
-                    Log.d(TAG, "🔌 Updating WebSocket connection status: ${state.isWebSocketConnected}")
-                    updateConnectionStatus(state.isWebSocketConnected)
                 }
             }
             
@@ -131,7 +128,6 @@ class DashboardFragment : Fragment() {
                 Log.d(TAG, "📊 Updating stats: totalJobs=${stats.totalJobs}, totalTasks=${stats.totalTasks}, totalWorkers=${stats.totalWorkers}")
                 binding.totalJobsValue.text = stats.totalJobs.toString()
                 binding.totalTasksValue.text = stats.totalTasks.toString()
-                binding.totalWorkersValue.text = stats.totalWorkers.toString()
                 binding.activeJobsValue.text = stats.activeJobs.toString()
                 binding.completedJobsValue.text = stats.completedJobs.toString()
                 Log.d(TAG, "📊 Stats updated successfully")
@@ -145,13 +141,12 @@ class DashboardFragment : Fragment() {
                 Log.d(TAG, "🔌 WebSocket stats updated successfully")
             } ?: Log.w(TAG, "🔌 WebSocket stats data is null")
             
-            // Update recent activities
-            state.activity?.let { activities ->
-                val displayActivities = activities.take(5)
-                Log.d(TAG, "📈 Updating activities: showing ${displayActivities.size} out of ${activities.size} total activities")
-                activityAdapter.submitList(displayActivities)
-                Log.d(TAG, "📈 Activities updated successfully")
-            } ?: Log.w(TAG, "📈 Activity data is null")
+            // Update recent activities (filtered for this device)
+            val filteredActivities = viewModel.getActivityForCurrentWorker()
+            val displayActivities = filteredActivities.take(5)
+            Log.d(TAG, "📈 Updating activities: showing ${displayActivities.size} out of ${filteredActivities.size} filtered activities for this device")
+            activityAdapter.submitList(displayActivities)
+            Log.d(TAG, "📈 Activities updated successfully")
             
             Log.d(TAG, "📊 Dashboard update completed")
         } catch (e: Exception) {
@@ -165,8 +160,8 @@ class DashboardFragment : Fragment() {
             binding.connectionStatusText.text = if (isConnected) "Connected" else "Disconnected"
             binding.connectionStatusText.setTextColor(
                 requireContext().getColor(
-                    if (isConnected) android.R.color.holo_green_light 
-                    else android.R.color.holo_red_light
+                    if (isConnected) R.color.success 
+                    else R.color.error
                 )
             )
             Log.d(TAG, "🔌 Connection status updated successfully")

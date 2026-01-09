@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    id("com.chaquo.python")
 }
 
 android {
@@ -15,6 +16,11 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            // On Apple silicon, you can omit x86_64.
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     buildTypes {
@@ -35,6 +41,30 @@ android {
     }
     buildFeatures {
         viewBinding = true
+    }
+    
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += setOf(
+                "**/libtensorflowlite_gpu_jni.so",
+                "**/libtensorflowlite_jni.so"
+            )
+        }
+    }
+    
+    chaquopy {
+        defaultConfig {
+            version = "3.8"
+            pip {
+                install("textblob")
+                install("nltk")
+                install("vaderSentiment")
+                install("numpy")
+                install("requests")
+                install("aiohttp")
+            }
+        }
     }
 }
 
@@ -59,6 +89,11 @@ dependencies {
     implementation(libs.websocket)
     implementation(libs.kotlinx.coroutines.android)
     
+    // TensorFlow Lite for on-device ML inference
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

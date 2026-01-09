@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark Theme -->
+    <style name="AppTheme" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Primary Colors -->
+        <item name="colorPrimary">@color/primary_dark_theme</item>
+        <item name="colorPrimaryDark">@color/primary_dark_dark_theme</item>
+        <item name="colorAccent">@color/accent_dark_theme</item>
+        
+        <!-- Background Colors -->
+        <item name="android:windowBackground">@color/background_dark</item>
+        <item name="android:statusBarColor">@color/surface_primary_dark</item>
+        <item name="android:navigationBarColor">@color/surface_primary_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        
+        <!-- Surface Colors -->
+        <item name="colorSurface">@color/surface_primary_dark</item>
+        <item name="colorSurfaceVariant">@color/surface_secondary_dark</item>
+        
+        <!-- Text Colors -->
+        <item name="android:textColorPrimary">@color/text_primary_dark</item>
+        <item name="android:textColorSecondary">@color/text_secondary_dark</item>
+        
+        <!-- Custom Styles -->
+        <item name="toolbarStyle">@style/Widget.App.Toolbar.Dark</item>
+    </style>
+
+    <!-- Tab Text Appearance for Dark Theme -->
+    <style name="TabTextAppearance.Dark" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/text_secondary_dark</item>
+        <item name="android:textColorHint">@color/text_secondary_dark</item>
+    </style>
+
+    <!-- Card Style for Dark Theme -->
+    <style name="CardStyle.Dark" parent="Widget.Material3.CardView.Filled">
+        <item name="cardBackgroundColor">@color/surface_secondary_dark</item>
+        <item name="cardElevation">2dp</item>
+        <item name="cardCornerRadius">12dp</item>
+    </style>
+
+    <!-- Button Styles for Dark Theme -->
+    <style name="PrimaryButton.Dark" parent="Widget.Material3.Button">
+        <item name="backgroundTint">@color/primary_dark_theme</item>
+        <item name="android:textColor">@color/text_primary_dark</item>
+        <item name="cornerRadius">20dp</item>
+    </style>
+
+    <style name="SecondaryButton.Dark" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="strokeColor">@color/primary_dark_theme</item>
+        <item name="android:textColor">@color/primary_dark_theme</item>
+        <item name="cornerRadius">20dp</item>
+    </style>
+
+    <!-- Text Styles for Dark Theme -->
+    <style name="TextHeadline.Dark" parent="TextAppearance.Material3.HeadlineMedium">
+        <item name="android:textColor">@color/text_primary_dark</item>
+        <item name="android:textSize">20sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <style name="TextBody.Dark" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textColor">@color/text_primary_dark</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
+    <style name="TextCaption.Dark" parent="TextAppearance.Material3.BodySmall">
+        <item name="android:textColor">@color/text_secondary_dark</item>
+        <item name="android:textSize">12sp</item>
+    </style>
+
+    <!-- Status Styles for Dark Theme -->
+    <style name="StatusSuccess.Dark">
+        <item name="android:textColor">@color/success_dark</item>
+        <item name="android:background">@color/success_dark</item>
+    </style>
+
+    <style name="StatusWarning.Dark">
+        <item name="android:textColor">@color/warning_dark</item>
+        <item name="android:background">@color/warning_dark</item>
+    </style>
+
+    <style name="StatusError.Dark">
+        <item name="android:textColor">@color/error_dark</item>
+        <item name="android:background">@color/error_dark</item>
+    </style>
+
+    <style name="StatusInfo.Dark">
+        <item name="android:textColor">@color/info_dark</item>
+        <item name="android:background">@color/info_dark</item>
+    </style>
+
+    <!-- Toolbar Style for Dark Theme -->
+    <style name="Widget.App.Toolbar.Dark" parent="Widget.Material3.Toolbar">
+        <item name="android:background">@color/surface_primary_dark</item>
+        <item name="titleTextColor">@color/text_primary_dark</item>
+        <item name="subtitleTextColor">@color/text_secondary_dark</item>
+    </style>
+</resources>

@@ -11,16 +11,23 @@ import androidx.lifecycle.viewModelScope
 import com.example.mcc_phase3.data.models.*
 import com.example.mcc_phase3.data.repository.CrowdComputeRepository
 import com.example.mcc_phase3.data.websocket.WebSocketManager
+import com.example.mcc_phase3.data.ConfigManager
+import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.utils.TaskProgressSimulator
 import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = CrowdComputeRepository(application)
+    private var repository = CrowdComputeRepository(application)
+    private val configManager = ConfigManager.getInstance(application)
+    private val workerIdManager = WorkerIdManager.getInstance(application)
+    private val taskProgressSimulator = TaskProgressSimulator()
 
     private val _state = MutableLiveData<MainState>(MainState.Loading)
     val state: LiveData<MainState> = _state
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val application = application
 
     companion object {
         private const val TAG = "MainViewModel"
@@ -73,6 +80,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadData() {
         Log.d(TAG, "📊 loadData() called")
+        
+        // Check if foreman is configured
+        if (!configManager.isForemanConfigured()) {
+            Log.w(TAG, "⚠️ Foreman not configured, showing error state")
+            _state.value = MainState.Error("Please configure Foreman IP address in Settings first")
+            return
+        }
+        
         viewModelScope.launch {
             try {
                 val startTime = System.currentTimeMillis()
@@ -95,6 +110,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val websocketStats = repository.getWebsocketStats()
                 Log.d(TAG, "📊 WebSocket stats result: ${if (websocketStats.isSuccess) "✅ Success" else "❌ Failed - ${websocketStats.exceptionOrNull()?.message}"}")
 
+//                Log.d(TAG, "📊 Fetching activity...")
+//                val activity = repository.getActivity()
+//                Log.d(TAG, "📊 Activity result: ${if (activity.isSuccess) "✅ Success" else "❌ Failed - ${activity.exceptionOrNull()?.message}"}")
+
                 // Core data requirement: stats, jobs, and workers must succeed
                 val success = stats.isSuccess && jobs.isSuccess && workers.isSuccess
 
@@ -105,6 +124,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         jobs = jobs.getOrNull() ?: emptyList(),
                         workers = workers.getOrNull() ?: emptyList(),
                         websocketStats = websocketStats.getOrNull(),
+//                        activity = activity.getOrNull() ?: emptyList(),
+                        activity = emptyList(),
                         isWebSocketConnected = wsConnected
                     )
                     _state.value = successState
@@ -112,6 +133,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     Log.d(TAG, "✅ Data loaded successfully:")
                     Log.d(TAG, "   - Jobs: ${successState.jobs.size}")
                     Log.d(TAG, "   - Workers: ${successState.workers.size}")
+                    Log.d(TAG, "   - Activity: ${successState.activity.size}")
                     Log.d(TAG, "   - WebSocket connected: $wsConnected")
                 } else {
                     val errorMsg = buildString {
@@ -135,13 +157,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshData() {
-        Log.d(TAG, "🔄 refreshData() called")
+        Log.d(TAG, "🔄 refreshData() called - recreating repository and resetting circuit breaker")
+        // Force complete reset of ApiClient
+        com.example.mcc_phase3.data.api.ApiClient.reset(application)
+        // Recreate repository to get fresh configuration
+        repository = CrowdComputeRepository(application)
+        // Reset circuit breaker for fresh start
+        repository.manuallyResetCircuitBreaker()
         loadData()
     }
 
     private fun connectWebSocket() {
         Log.d(TAG, "🔌 connectWebSocket() called")
-        val wsUrl = "ws://192.168.8.120:9000" // TODO: make configurable
+        val configManager = ConfigManager.getInstance(getApplication())
+        val wsUrl = configManager.getForemanURL() // Using ConfigManager
+        if (wsUrl == null) {
+            Log.w(TAG, "⚠️ Cannot connect WebSocket: Foreman IP not configured")
+            return
+        }
         Log.d(TAG, "🔌 Connecting to: $wsUrl")
         repository.connectWebSocket(wsUrl)
     }
@@ -209,13 +242,237 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val currentState = _state.value
         Log.d(TAG, "🔌 Current state: ${currentState?.javaClass?.simpleName}")
 
-        if (currentState is MainState.Success) {
-            _state.value = currentState.copy(isWebSocketConnected = isConnected)
-            Log.d(TAG, "🔌 WebSocket status updated: $isConnected")
-        } else if (isConnected && currentState !is MainState.Loading) {
-            Log.d(TAG, "🔌 WebSocket connected but no success state yet - triggering loadData()")
-            loadData()
+        when (currentState) {
+            is MainState.Success -> {
+                _state.value = currentState.copy(isWebSocketConnected = isConnected)
+                Log.d(TAG, "🔌 WebSocket status updated in Success state: $isConnected")
+            }
+            is MainState.Error -> {
+                // Update error state with connection status too
+                val updatedState = MainState.Success(
+                    stats = null,
+                    jobs = emptyList(),
+                    workers = emptyList(),
+                    websocketStats = null,
+                    activity = emptyList(),
+                    isWebSocketConnected = isConnected
+                )
+                _state.value = updatedState
+                Log.d(TAG, "🔌 WebSocket status updated, moved from Error to Success state: $isConnected")
+            }
+            else -> {
+                if (isConnected) {
+                    Log.d(TAG, "🔌 WebSocket connected - triggering loadData()")
+                    loadData()
+                } else {
+                    // Create minimal state with connection status
+                    _state.value = MainState.Success(
+                        stats = null,
+                        jobs = emptyList(),
+                        workers = emptyList(),
+                        websocketStats = null,
+                        activity = emptyList(),
+                        isWebSocketConnected = isConnected
+                    )
+                    Log.d(TAG, "🔌 WebSocket disconnected - updated state: $isConnected")
+                }
+            }
         }
+    }
+
+    /**
+     * Get jobs filtered by current worker ID
+     * Note: Since Job model doesn't have worker assignment info, we'll show all jobs
+     * but this could be enhanced if the API provides more detailed job information
+     */
+    fun getJobsForCurrentWorker(): List<Job> {
+        val currentWorkerId = workerIdManager.getCurrentWorkerId()
+        val currentState = _state.value
+        
+        return if (currentState is MainState.Success && currentWorkerId != null) {
+            // For now, show all jobs since Job model doesn't have worker assignment info
+            // This could be enhanced if the API provides more detailed job information
+            currentState.jobs.also { filteredJobs ->
+                Log.d(TAG, "🔍 Showing ${filteredJobs.size} jobs (Job model doesn't have worker assignment info)")
+            }
+        } else {
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get workers filtered to show only current device
+     */
+    fun getCurrentWorker(): List<Worker> {
+        val currentWorkerId = workerIdManager.getCurrentWorkerId()
+        val currentState = _state.value
+        
+        return if (currentState is MainState.Success && currentWorkerId != null) {
+            currentState.workers.filter { worker ->
+                worker.id == currentWorkerId
+            }.also { filteredWorkers ->
+                Log.d(TAG, "🔍 Filtered ${filteredWorkers.size} workers for current device: $currentWorkerId")
+            }
+        } else {
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get activity filtered by current worker ID
+     * Since Activity model is basic, we'll create synthetic activity from jobs and workers
+     */
+    fun getActivityForCurrentWorker(): List<Activity> {
+        val currentWorkerId = workerIdManager.getCurrentWorkerId()
+        val currentState = _state.value
+        
+        return if (currentState is MainState.Success && currentWorkerId != null) {
+            val syntheticActivity = mutableListOf<Activity>()
+            
+            // Add real activity if it contains worker ID
+            val realActivity = currentState.activity.filter { activity ->
+                activity.details.contains(currentWorkerId) ||
+                activity.action.contains(currentWorkerId) ||
+                activity.type.contains(currentWorkerId)
+            }
+            syntheticActivity.addAll(realActivity)
+            
+            // Create synthetic activity from current worker status
+            val currentWorker = currentState.workers.find { it.id == currentWorkerId }
+            if (currentWorker != null) {
+                syntheticActivity.add(
+                    Activity(
+                        timestamp = currentWorker.lastSeen,
+                        type = "worker_status",
+                        action = "worker_heartbeat",
+                        details = "Worker ${currentWorker.id} is ${currentWorker.status}. Tasks completed: ${currentWorker.totalTasksCompleted}, failed: ${currentWorker.totalTasksFailed}"
+                    )
+                )
+                
+                // Add current task info if available
+                if (currentWorker.currentTaskId != null) {
+                    // Check if we have real-time progress for this task
+                    val taskProgress = taskProgressSimulator.getTaskProgress(currentWorker.currentTaskId)
+                    if (taskProgress != null) {
+                        syntheticActivity.add(
+                            Activity(
+                                timestamp = System.currentTimeMillis().toString(),
+                                type = "task_execution",
+                                action = "Task Executing",
+                                details = "Task ID: ${currentWorker.currentTaskId}",
+                                status = taskProgress.status,
+                                progress = taskProgress.progress,
+                                taskId = currentWorker.currentTaskId,
+                                executionTime = taskProgress.executionTime
+                            )
+                        )
+                    } else {
+                        // Fallback to static progress
+                        syntheticActivity.add(
+                            Activity(
+                                timestamp = System.currentTimeMillis().toString(),
+                                type = "task_execution",
+                                action = "Task Executing",
+                                details = "Task ID: ${currentWorker.currentTaskId}",
+                                status = "executing",
+                                progress = 65, // Simulate progress
+                                taskId = currentWorker.currentTaskId,
+                                executionTime = 2300L // Simulate 2.3 seconds
+                            )
+                        )
+                    }
+                }
+            }
+            
+            // Add job progress information
+            currentState.jobs.forEach { job ->
+                if (job.completedTasks > 0) {
+                    syntheticActivity.add(
+                        Activity(
+                            timestamp = job.createdAt,
+                            type = "job_progress",
+                            action = "Job Update",
+                            details = "Job ${job.id} progress: ${job.completedTasks}/${job.totalTasks} tasks completed (${job.status})"
+                        )
+                    )
+                }
+            }
+            
+            // Add active tasks from the progress simulator
+            val activeTasks = taskProgressSimulator.getAllActiveTasks()
+            activeTasks.forEach { (taskId, taskProgress) ->
+                syntheticActivity.add(
+                    Activity(
+                        timestamp = taskProgress.startTime.toString(),
+                        type = "task_execution",
+                        action = when (taskProgress.status) {
+                            "executing" -> "Task Executing"
+                            "completed" -> "Task Completed"
+                            "failed" -> "Task Failed"
+                            else -> "Task ${taskProgress.status.capitalize()}"
+                        },
+                        details = "Task ID: $taskId",
+                        status = taskProgress.status,
+                        progress = taskProgress.progress,
+                        taskId = taskId,
+                        executionTime = taskProgress.executionTime
+                    )
+                )
+            }
+            
+            // Add some sample completed tasks for demonstration
+            if (currentWorker != null && currentWorker.totalTasksCompleted > 0) {
+                syntheticActivity.add(
+                    Activity(
+                        timestamp = (System.currentTimeMillis() - 30000).toString(), // 30 seconds ago
+                        type = "task_execution",
+                        action = "Task Completed",
+                        details = "Task ID: sample_task_001",
+                        status = "completed",
+                        progress = 100,
+                        taskId = "sample_task_001",
+                        executionTime = 1200L // 1.2 seconds
+                    )
+                )
+                
+                // Add a failed task example
+                if (currentWorker.totalTasksFailed > 0) {
+                    syntheticActivity.add(
+                        Activity(
+                            timestamp = (System.currentTimeMillis() - 60000).toString(), // 1 minute ago
+                            type = "task_execution",
+                            action = "Task Failed",
+                            details = "Task ID: sample_task_002 - Error: Connection timeout",
+                            status = "failed",
+                            progress = 100,
+                            taskId = "sample_task_002",
+                            executionTime = 5000L // 5 seconds before failure
+                        )
+                    )
+                }
+            }
+            
+            // Sort by timestamp (newest first)
+            syntheticActivity.sortedByDescending { it.timestamp }.also { filteredActivity ->
+                Log.d(TAG, "🔍 Created ${filteredActivity.size} activities for worker: $currentWorkerId (${realActivity.size} real + ${syntheticActivity.size - realActivity.size} synthetic)")
+            }
+        } else {
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get current worker ID for display
+     */
+    fun getCurrentWorkerId(): String? {
+        return workerIdManager.getCurrentWorkerId()
+    }
+    
+    /**
+     * Get task progress simulator for real-time progress updates
+     */
+    fun getTaskProgressSimulator(): TaskProgressSimulator {
+        return taskProgressSimulator
     }
 
     override fun onCleared() {

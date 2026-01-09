@@ -63,7 +63,15 @@ class WorkersFragment : Fragment() {
                     }
                     is MainState.Success -> {
                         binding.swipeRefresh.isRefreshing = false
-                        workersAdapter.submitList(state.workers)
+                        // Show only this device's worker information
+                        val currentWorker = viewModel.getCurrentWorker()
+                        workersAdapter.submitList(currentWorker)
+                        
+                        // Update UI to show filtering info
+                        if (currentWorker.isEmpty()) {
+                            // Show message that this device is not registered as a worker
+                            showError("This device is not registered as a worker. Make sure the mobile worker is running and connected.")
+                        }
                     }
                     is MainState.Error -> {
                         binding.swipeRefresh.isRefreshing = false
