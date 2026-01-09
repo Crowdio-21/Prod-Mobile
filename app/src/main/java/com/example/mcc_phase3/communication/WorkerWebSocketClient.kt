@@ -163,15 +163,49 @@ class WorkerWebSocketClient(private val context: Context) {
      * Register worker with backend
      */
     private fun registerWorker() {
-        try {
-            val workerId = workerIdManager.getOrGenerateWorkerId()
-            val readyMessage = MessageProtocol.createWorkerReadyMessage(workerId)
-            
-            sendMessage(readyMessage)
-            Log.d(TAG, "📝 Worker ready message sent: $workerId")
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send worker ready message", e)
+        clientScope.launch {
+            try {
+                val workerId = workerIdManager.getOrGenerateWorkerId()
+                
+                // Collect device specifications
+                Log.d(TAG, "📊 Collecting device specifications...")
+                val deviceSpecsCollector = com.example.mcc_phase3.data.device.DeviceSpecsCollector(context)
+                val deviceSpecs = deviceSpecsCollector.collectDeviceSpecs()
+                
+                // Get Python version from PythonExecutor
+                val pythonVersion = try {
+                    val pythonInfo = taskProcessor.getPythonVersion()
+                    pythonInfo ?: "Unknown"
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ Could not get Python version: ${e.message}")
+                    "Unknown"
+                }
+                
+                // Create WORKER_READY message with device specs
+                val readyMessage = MessageProtocol.createWorkerReadyMessage(
+                    workerId = workerId,
+                    deviceType = deviceSpecs.deviceType,
+                    osType = deviceSpecs.osType,
+                    osVersion = deviceSpecs.osVersion,
+                    cpuModel = deviceSpecs.cpuModel,
+                    cpuCores = deviceSpecs.cpuCores,
+                    cpuThreads = deviceSpecs.cpuThreads,
+                    cpuFrequencyMhz = deviceSpecs.cpuFrequencyMhz,
+                    ramTotalMb = deviceSpecs.ramTotalMb,
+                    ramAvailableMb = deviceSpecs.ramAvailableMb,
+                    gpuModel = deviceSpecs.gpuModel,
+                    batteryLevel = deviceSpecs.batteryLevel,
+                    isCharging = deviceSpecs.isCharging,
+                    networkType = deviceSpecs.networkType,
+                    pythonVersion = pythonVersion
+                )
+                
+                sendMessage(readyMessage)
+                Log.d(TAG, "📝 Worker ready message sent with device specs: $workerId")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to send worker ready message", e)
+            }
         }
     }
     
