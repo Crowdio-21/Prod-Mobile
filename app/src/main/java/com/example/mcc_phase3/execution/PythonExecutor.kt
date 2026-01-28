@@ -567,17 +567,42 @@ def sentiment_analysis_worker(message_data):
                 }
             }
             
-            // Convert PyObject result to Java object/string
-            // If result is a string (JSON), return it as is
-            val result = pyResult?.toJava(Any::class.java)
-            
-            // If result is a string that looks like JSON, return it directly
-            // Otherwise convert to string representation
-            if (result is String) {
-                result
-            } else {
-                result?.toString() ?: "null"
+            // Convert PyObject result to proper Java type
+            if (pyResult == null) {
+                return "null"
             }
+            
+            // Check if it's a Python dict and convert to JSON string
+            val builtins = pythonInstance?.getModule("builtins")
+            val dictType = builtins?.get("dict")
+            val isDict = builtins?.callAttr("isinstance", pyResult, dictType)?.toJava(Boolean::class.java) == true
+            
+            if (isDict) {
+                // Convert dict to JSON string using Python's json module
+                val jsonStr = jsonModule?.callAttr("dumps", pyResult)?.toString()
+                Log.d(TAG, "Converted dict result to JSON: $jsonStr")
+                return jsonStr ?: "{}"
+            }
+            
+            // Check if it's a string
+            val strType = builtins?.get("str")
+            val isStr = builtins?.callAttr("isinstance", pyResult, strType)?.toJava(Boolean::class.java) == true
+            if (isStr) {
+                return pyResult.toString()
+            }
+            
+            // For other types, try to convert via JSON
+            try {
+                val jsonStr = jsonModule?.callAttr("dumps", pyResult)?.toString()
+                if (jsonStr != null) {
+                    return jsonStr
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "JSON conversion failed, using toString: ${e.message}")
+            }
+            
+            // Fallback to string representation
+            pyResult.toString()
             
         } catch (e: Exception) {
             Log.e(TAG, "Error executing function with arguments", e)
@@ -603,6 +628,20 @@ def sentiment_analysis_worker(message_data):
             }
             
             Log.d(TAG, "Converting PyObject to Java List: $taskArgs")
+
+            // If the incoming object is a dict, convert it to a Java Map so values aren't dropped.
+            try {
+                val builtins = pythonInstance?.getModule("builtins")
+                val dictType = builtins?.get("dict")
+                val isDict = builtins?.callAttr("isinstance", taskArgs, dictType)?.toJava(Boolean::class.java) == true
+                if (isDict) {
+                    val asJavaMap = taskArgs.toJava(Map::class.java)
+                    Log.d(TAG, "Detected dict; returning map inside list to preserve key/values")
+                    return listOf(asJavaMap)
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Dict detection failed, falling back to list handling: ${e.message}")
+            }
             
             // First, try direct conversion using asList()
             try {
