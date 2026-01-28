@@ -1,5 +1,6 @@
 package com.example.mcc_phase3.communication
 
+import android.content.Context
 import org.json.JSONObject
 
 /**
@@ -22,9 +23,30 @@ object MessageProtocol {
     
     /**
      * Create a worker ready message with device specifications
-     * Matches PC worker format with nested device_specs dictionary
+     * Enhanced to use DeviceInfoCollector for comprehensive device info
      */
     fun createWorkerReadyMessage(
+        workerId: String,
+        context: Context
+    ): String {
+        val collector = DeviceInfoCollector(context)
+        val specs = collector.getDeviceSpecs()
+        
+        return JSONObject().apply {
+            put("type", MessageType.WORKER_READY)
+            put("data", JSONObject().apply {
+                put("worker_id", workerId)
+                put("device_specs", JSONObject(specs.toMap()))
+            })
+            put("timestamp", System.currentTimeMillis())
+        }.toString()
+    }
+    
+    /**
+     * Legacy method with manual parameters (deprecated, use context-based version)
+     */
+    @Deprecated("Use createWorkerReadyMessage(workerId, context) instead")
+    fun createWorkerReadyMessageLegacy(
         workerId: String,
         deviceType: String = "Android",
         osType: String = "Android",
@@ -131,40 +153,60 @@ object MessageProtocol {
     }
     
     /**
-     * Create a heartbeat message
-     * Matches desktop worker format exactly:
-     * {"type": "worker_heartbeat", "data": {"worker_id": "worker-3db33644", "status": "online", "current_task": null}, "job_id": null}
-     * job_id is null only when no job is assigned, otherwise contains the actual job ID
+     * Create a heartbeat message with performance metrics
+     * Matches desktop worker format with optional performance data
      */
     fun createHeartbeatMessage(
         workerId: String,
         currentTaskId: String? = null,
-        jobId: String? = null
+        jobId: String? = null,
+        context: Context? = null
     ): String {
         return JSONObject().apply {
-            // type field (matches desktop worker format)
             put("type", MessageType.WORKER_HEARTBEAT)
             
-            // data field (matches desktop worker format)
             put("data", JSONObject().apply {
                 put("worker_id", workerId)
                 put("status", "online")
                 put("current_task", currentTaskId)
+                
+                // Add performance metrics if context is provided
+                context?.let {
+                    val collector = DeviceInfoCollector(it)
+                    val metrics = collector.getPerformanceMetrics()
+                    val metricsMap = metrics.toMap()
+                    metricsMap.forEach { (key, value) ->
+                        put(key, value)
+                    }
+                }
             })
             
-            // job_id field - null only if not assigned, otherwise contains actual job ID
             put("job_id", jobId)
         }.toString()
     }
     
     /**
-     * Create a pong message
+     * Create a pong message with optional performance metrics
      */
-    fun createPongMessage(workerId: String): String {
+    fun createPongMessage(
+        workerId: String,
+        context: Context? = null
+    ): String {
         return JSONObject().apply {
             put("type", MessageType.PONG)
             put("data", JSONObject().apply {
                 put("worker_id", workerId)
+                put("status", "online")
+                
+                // Add performance metrics if context is provided
+                context?.let {
+                    val collector = DeviceInfoCollector(it)
+                    val metrics = collector.getPerformanceMetrics()
+                    val metricsMap = metrics.toMap()
+                    metricsMap.forEach { (key, value) ->
+                        put(key, value)
+                    }
+                }
             })
             put("timestamp", System.currentTimeMillis())
         }.toString()

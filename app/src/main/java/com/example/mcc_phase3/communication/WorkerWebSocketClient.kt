@@ -167,37 +167,11 @@ class WorkerWebSocketClient(private val context: Context) {
             try {
                 val workerId = workerIdManager.getOrGenerateWorkerId()
                 
-                // Collect device specifications
+                // Create WORKER_READY message with device specs (auto-collected)
                 Log.d(TAG, "📊 Collecting device specifications...")
-                val deviceSpecsCollector = com.example.mcc_phase3.data.device.DeviceSpecsCollector(context)
-                val deviceSpecs = deviceSpecsCollector.collectDeviceSpecs()
-                
-                // Get Python version from PythonExecutor
-                val pythonVersion = try {
-                    val pythonInfo = taskProcessor.getPythonVersion()
-                    pythonInfo ?: "Unknown"
-                } catch (e: Exception) {
-                    Log.w(TAG, "⚠️ Could not get Python version: ${e.message}")
-                    "Unknown"
-                }
-                
-                // Create WORKER_READY message with device specs
                 val readyMessage = MessageProtocol.createWorkerReadyMessage(
                     workerId = workerId,
-                    deviceType = deviceSpecs.deviceType,
-                    osType = deviceSpecs.osType,
-                    osVersion = deviceSpecs.osVersion,
-                    cpuModel = deviceSpecs.cpuModel,
-                    cpuCores = deviceSpecs.cpuCores,
-                    cpuThreads = deviceSpecs.cpuThreads,
-                    cpuFrequencyMhz = deviceSpecs.cpuFrequencyMhz,
-                    ramTotalMb = deviceSpecs.ramTotalMb,
-                    ramAvailableMb = deviceSpecs.ramAvailableMb,
-                    gpuModel = deviceSpecs.gpuModel,
-                    batteryLevel = deviceSpecs.batteryLevel,
-                    isCharging = deviceSpecs.isCharging,
-                    networkType = deviceSpecs.networkType,
-                    pythonVersion = pythonVersion
+                    context = context
                 )
                 
                 sendMessage(readyMessage)
@@ -301,7 +275,7 @@ class WorkerWebSocketClient(private val context: Context) {
         try {
             Log.d(TAG, "📡 Received ping, sending pong")
             val workerId = workerIdManager.getCurrentWorkerId() ?: "unknown"
-            val pongMessage = MessageProtocol.createPongMessage(workerId)
+            val pongMessage = MessageProtocol.createPongMessage(workerId, context)
             sendMessage(pongMessage)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error handling ping", e)
@@ -328,7 +302,8 @@ class WorkerWebSocketClient(private val context: Context) {
                         val heartbeatMessage = MessageProtocol.createHeartbeatMessage(
                             workerId,
                             currentTaskId,
-                            currentJobId
+                            currentJobId,
+                            context
                         )
                         
                         sendMessage(heartbeatMessage)
@@ -446,7 +421,7 @@ class WorkerWebSocketClient(private val context: Context) {
             val currentTaskId = taskStatus["current_task_id"] as? String
             val currentJobId = taskStatus["current_job_id"] as? String
             
-            val heartbeatMessage = MessageProtocol.createHeartbeatMessage(workerId, currentTaskId, currentJobId)
+            val heartbeatMessage = MessageProtocol.createHeartbeatMessage(workerId, currentTaskId, currentJobId, context)
             sendMessage(heartbeatMessage)
             val taskInfo = if (currentTaskId.isNullOrEmpty()) "No task" else currentTaskId
             Log.d(TAG, "💓 Immediate heartbeat sent - Worker: $workerId, Task: $taskInfo")

@@ -95,10 +95,13 @@ class PythonExecutor(private val context: Context) {
                     serializedCode // Use as plain text
                 }
                 
-                // Replace PyTorch sentiment function with TextBlob version for mobile
+                // Replace PyTorch/Transformers sentiment functions with TextBlob version for mobile
                 if (pythonCode.contains("import torch") && pythonCode.contains("sentiment_worker_pytorch")) {
                     Log.d(TAG, "⚠️ Detected PyTorch sentiment function, replacing with mobile-compatible version")
                     pythonCode = loadMobileSentimentWorker()
+                } else if (pythonCode.contains("from transformers import") || pythonCode.contains("import transformers")) {
+                    Log.d(TAG, "⚠️ Detected Transformers library usage, replacing with mobile-compatible version")
+                    pythonCode = getMobileCompatibleSentimentFunction()
                 }
                 
                 Log.d(TAG, "Python code (first 100 chars): ${pythonCode.take(100)}...")
@@ -316,6 +319,157 @@ def sentiment_worker_pytorch(text):
         """.trimIndent()
     }
     
+    /**
+     * Get mobile-compatible sentiment analysis function
+     * Replaces transformers-based functions with TextBlob
+     */
+    private fun getMobileCompatibleSentimentFunction(): String {
+        return """
+def sentiment_analysis_worker(message_data):
+    '''
+    Mobile-compatible sentiment analysis worker using TextBlob.
+    Replaces transformers library which is not available on Android.
+    
+    Args:
+        message_data: Dictionary containing 'text' and 'message_id'
+    
+    Returns:
+        Dictionary with sentiment analysis results
+    '''
+    import json
+    import time
+    
+    start_time = time.time()
+    
+    try:
+        # Extract data
+        text = message_data.get('text', '')
+        message_id = message_data.get('message_id', 0)
+        
+        # Try TextBlob first
+        try:
+            from textblob import TextBlob
+            
+            blob = TextBlob(text)
+            polarity = blob.sentiment.polarity  # Range: -1.0 (negative) to 1.0 (positive)
+            subjectivity = blob.sentiment.subjectivity  # Range: 0.0 (objective) to 1.0 (subjective)
+            model_used = "TextBlob_Mobile"
+            
+        except ImportError:
+            # Fallback to VADER sentiment if TextBlob not available
+            try:
+                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+                
+                analyzer = SentimentIntensityAnalyzer()
+                scores = analyzer.polarity_scores(text)
+                
+                # VADER returns compound score (-1 to 1)
+                polarity = scores['compound']
+                subjectivity = 0.5  # VADER doesn't provide subjectivity
+                model_used = "VADER_Mobile"
+                
+            except ImportError as e:
+                # If both fail, return error
+                raise ImportError("Neither TextBlob nor VADER sentiment libraries are available")
+        
+        # Normalize polarity to 0-1 range like transformers output
+        sentiment_score = (polarity + 1.0) / 2.0  # Convert -1..1 to 0..1
+        
+        # Determine sentiment label
+        if polarity > 0.1:
+            sentiment_label = "POSITIVE"
+        elif polarity < -0.1:
+            sentiment_label = "NEGATIVE"
+        else:
+            sentiment_label = "NEUTRAL"
+        
+        # Calculate confidence based on absolute polarity
+        confidence = abs(polarity)
+        
+        # Calculate positive and negative signals
+        positive_signals = max(0.0, polarity)
+        negative_signals = abs(min(0.0, polarity))
+        
+        # Generate advice based on sentiment
+        advice = []
+        if sentiment_label == "NEGATIVE":
+            if negative_signals > 0.7:
+                advice.append("High priority: Customer is very dissatisfied")
+            advice.append("Recommend immediate follow-up")
+            advice.append("Consider escalation to senior support")
+        elif sentiment_label == "POSITIVE":
+            advice.append("Customer is satisfied")
+            advice.append("Standard response time acceptable")
+        else:
+            advice.append("Neutral sentiment detected")
+            advice.append("Monitor for further interaction")
+        
+        # Calculate latency
+        latency_ms = int((time.time() - start_time) * 1000)
+        
+        # Create text preview
+        text_preview = text[:100] + "..." if len(text) > 100 else text
+        
+        result = {
+            "message_id": message_id,
+            "text_preview": text_preview,
+            "sentiment_score": round(sentiment_score, 3),
+            "sentiment_label": sentiment_label,
+            "confidence": round(confidence, 3),
+            "positive_signals": round(positive_signals, 3),
+            "negative_signals": round(negative_signals, 3),
+            "advice": advice,
+            "latency_ms": latency_ms,
+            "status": "success",
+            "model": model_used
+        }
+        
+        print(f"[Worker] Sentiment: {sentiment_label} | Score: {sentiment_score:.3f} | Model: {model_used}")
+        return result
+        
+    except ImportError as e:
+        latency_ms = int((time.time() - start_time) * 1000)
+        print(f"[Worker Error] {str(e)}")
+        
+        return {
+            "message_id": message_data.get('message_id', 0),
+            "text_preview": message_data.get('text', '')[:100] + "...",
+            "sentiment_score": 0.5,
+            "sentiment_label": "ERROR",
+            "confidence": 0.0,
+            "positive_signals": 0.0,
+            "negative_signals": 0.0,
+            "advice": [f"Analysis failed: {str(e)}"],
+            "latency_ms": latency_ms,
+            "status": "failed",
+            "error": str(e),
+            "model": "None"
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        
+        latency_ms = int((time.time() - start_time) * 1000)
+        print(f"[Worker Error] {str(e)}")
+        
+        return {
+            "message_id": message_data.get('message_id', 0),
+            "text_preview": message_data.get('text', '')[:100] + "...",
+            "sentiment_score": 0.5,
+            "sentiment_label": "ERROR",
+            "confidence": 0.0,
+            "positive_signals": 0.0,
+            "negative_signals": 0.0,
+            "advice": [f"Analysis failed: {str(e)}"],
+            "latency_ms": latency_ms,
+            "status": "failed",
+            "error": str(e),
+            "model": "None"
+        }
+        """.trimIndent()
+    }
+
     /**
      * Extract function name from Python code
      */
