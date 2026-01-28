@@ -276,11 +276,11 @@ class PythonExecutor(private val context: Context) {
     
     /**
      * Get default mobile sentiment worker code
+     * Returns native Python dictionaries instead of JSON strings
      */
     private fun getDefaultMobileSentimentWorker(): String {
         return """
 def sentiment_worker_pytorch(text):
-    import json
     import time
     
     start = time.time()
@@ -304,10 +304,10 @@ def sentiment_worker_pytorch(text):
             "latency_ms": latency_ms,
             "status": "success"
         }
-        return json.dumps(result)
+        return result
     except Exception as e:
         latency_ms = int((time.time() - start) * 1000)
-        return json.dumps({
+        return {
             "text": text[:50] + "..." if len(text) > 50 else text,
             "sentiment": 0.0,
             "confidence": 0.0,
@@ -315,13 +315,14 @@ def sentiment_worker_pytorch(text):
             "status": "error",
             "error": str(e),
             "model": "TextBlob_Mobile"
-        })
+        }
         """.trimIndent()
     }
     
     /**
      * Get mobile-compatible sentiment analysis function
      * Replaces transformers-based functions with TextBlob
+     * Returns native Python dictionaries for efficient communication
      */
     private fun getMobileCompatibleSentimentFunction(): String {
         return """
@@ -334,9 +335,8 @@ def sentiment_analysis_worker(message_data):
         message_data: Dictionary containing 'text' and 'message_id'
     
     Returns:
-        Dictionary with sentiment analysis results
+        dict: Native Python dictionary with sentiment analysis results
     '''
-    import json
     import time
     
     start_time = time.time()

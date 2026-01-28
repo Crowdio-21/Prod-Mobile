@@ -2,6 +2,9 @@
 """
 Sentiment Analysis Worker using Available Mobile Libraries
 Uses TextBlob instead of PyTorch for mobile compatibility
+
+Returns native Python dictionaries (not JSON strings) for efficient
+inter-language communication with the Kotlin Android layer.
 """
 
 import time
@@ -12,6 +15,14 @@ def sentiment_worker_pytorch(text):
     """
     Sentiment analysis worker using TextBlob
     Mobile-optimized alternative to PyTorch
+    
+    Args:
+        text (str): The text to analyze for sentiment
+    
+    Returns:
+        dict: Native Python dictionary containing sentiment analysis results
+            with keys: text, sentiment, confidence, predicted_class, class_name,
+            neg_probability, pos_probability, subjectivity, model, latency_ms, status
     """
     import time
 
