@@ -4,8 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.communication.MessageProtocol
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.example.mcc_phase3.checkpoint.CheckpointHandler
+import com.example.mcc_phase3.checkpoint.CheckpointMessage
+import kotlinx.coroutines.*
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -38,6 +39,13 @@ class TaskProcessor(private val context: Context) {
     private val workerIdManager = WorkerIdManager.getInstance(context)
     private val pythonExecutor = PythonExecutor(context)
     private val isInitialized = AtomicBoolean(false)
+    
+    // Checkpoint handler for periodic progress reporting
+    private val checkpointHandler = CheckpointHandler(checkpointIntervalMs = 5000L)
+    private val processorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    // Callback for sending checkpoint messages via WebSocket
+    private var checkpointCallback: (suspend (CheckpointMessage) -> Unit)? = null
     
     // Task execution tracking
     private val currentTaskId = AtomicReference<String?>(null)
@@ -148,6 +156,22 @@ class TaskProcessor(private val context: Context) {
             isTaskRunning.set(true)
             
             try {
+                // Start checkpoint monitoring if callback is set
+                checkpointCallback?.let { callback ->
+                    // Pass checkpoint handler to Python executor for progress updates
+                    pythonExecutor.setCheckpointHandler(checkpointHandler)
+                    
+                    checkpointHandler.startCheckpointMonitoring(
+                        taskId = taskId,
+                        jobId = jobId,
+                        workerId = workerIdManager.getCurrentWorkerId(),
+                        scope = processorScope,
+                        sendCheckpoint = callback,
+                        pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
+                    )
+                    Log.i(TAG, "✅ Checkpoint monitoring started for task $taskId")
+                }
+                
                 // Execute the function code (matching desktop worker format)
                 val executionResult = pythonExecutor.executeCode(funcCode, taskArgs)
                 
@@ -163,6 +187,11 @@ class TaskProcessor(private val context: Context) {
                 response
                 
             } finally {
+                // Stop checkpoint monitoring
+                checkpointHandler.stopCheckpointMonitoring()
+                pythonExecutor.setCheckpointHandler(null)
+                Log.i(TAG, "🛑 Checkpoint monitoring stopped for task $taskId (sent ${checkpointHandler.getCheckpointCount()} checkpoints)")
+                
                 // Clear current task and job
                 currentTaskId.set(null)
                 currentJobId.set(null)
@@ -384,11 +413,53 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
+     * Set the checkpoint callback for sending checkpoint messages
+     * This should be called by WorkerWebSocketClient after connection
+     */
+    fun setCheckpointCallback(callback: suspend (CheckpointMessage) -> Unit) {
+        checkpointCallback = callback
+        Log.d(TAG, "Checkpoint callback set")
+    }
+    
+    /**
+     * Update checkpoint state (called during task execution)
+     * This allows Python code to report progress for checkpointing
+     */
+    fun updateCheckpointState(
+        trialsCompleted: Int,
+        totalCount: Long,
+        numTrials: Int,
+        progressPercent: Float,
+        estimatedE: Double = 0.0,
+        customData: Map<String, Any>? = null
+    ) {
+        checkpointHandler.updateState(
+            CheckpointHandler.CheckpointState(
+                trialsCompleted = trialsCompleted,
+                totalCount = totalCount,
+                numTrials = numTrials,
+                progressPercent = progressPercent,
+                estimatedE = estimatedE,
+                customData = customData
+            )
+        )
+    }
+    
+    /**
+     * Get the checkpoint handler for direct state updates
+     */
+    fun getCheckpointHandler(): CheckpointHandler {
+        return checkpointHandler
+    }
+    
+    /**
      * Cleanup resources
      */
     fun cleanup() {
         try {
             Log.d(TAG, "Cleaning up TaskProcessor...")
+            checkpointHandler.stopCheckpointMonitoring()
+            processorScope.cancel()
             currentTaskId.set(null)
             isTaskRunning.set(false)
             isInitialized.set(false)

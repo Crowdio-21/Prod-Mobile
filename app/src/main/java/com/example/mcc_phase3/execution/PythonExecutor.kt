@@ -6,9 +6,11 @@ import com.chaquo.python.Python
 import com.chaquo.python.PyObject
 import com.chaquo.python.android.AndroidPlatform
 import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * PythonExecutor handles only Python code execution via Chaquopy
@@ -16,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Initializing Python environment
  * - Executing Python code sent from backend
  * - Managing Python execution context
+ * - Supporting checkpoint state updates during execution
  * - NOT handling API calls or WebSocket communication
  */
 class PythonExecutor(private val context: Context) {
@@ -27,11 +30,43 @@ class PythonExecutor(private val context: Context) {
     private val isInitialized = AtomicBoolean(false)
     private val workerIdManager = WorkerIdManager.getInstance(context)
     
+    // Checkpoint handler reference for progress updates during execution
+    private val checkpointHandlerRef = AtomicReference<CheckpointHandler?>(null)
+    
     // Python modules
     private var pythonInstance: Python? = null
     private var builtinsModule: PyObject? = null
     private var jsonModule: PyObject? = null
     private var base64Module: PyObject? = null
+    
+    /**
+     * Set the checkpoint handler for progress updates during Python execution
+     */
+    fun setCheckpointHandler(handler: CheckpointHandler?) {
+        checkpointHandlerRef.set(handler)
+        Log.d(TAG, "Checkpoint handler ${if (handler != null) "set" else "cleared"}")
+    }
+    
+    /**
+     * Update checkpoint state (can be called from Python via callback)
+     */
+    fun updateCheckpointState(
+        progressPercent: Float,
+        estimatedE: Double,
+        trialsCompleted: Int,
+        totalCount: Long,
+        numTrials: Int = 0
+    ) {
+        checkpointHandlerRef.get()?.updateState(
+            CheckpointHandler.CheckpointState(
+                trialsCompleted = trialsCompleted,
+                totalCount = totalCount,
+                numTrials = numTrials,
+                progressPercent = progressPercent,
+                estimatedE = estimatedE
+            )
+        )
+    }
     
     /**
      * Initialize Python environment
@@ -120,9 +155,15 @@ class PythonExecutor(private val context: Context) {
                 }
 
                 Log.d(TAG, "Decoded arguments: $args")
+                
+                // Set up checkpoint callback in Python builtins if handler is available
+                setupCheckpointCallback()
 
                 // Execute the Python code using the desktop worker approach
                 val result = executeFunctionCode(pythonCode, args)
+                
+                // Clean up checkpoint callback
+                cleanupCheckpointCallback()
 
                 Log.d(TAG, "✅ Python code executed successfully")
                 mapOf<String, Any?>(
@@ -197,6 +238,103 @@ class PythonExecutor(private val context: Context) {
      */
     fun isReady(): Boolean {
         return isInitialized.get()
+    }
+    
+    /**
+     * Set up checkpoint callback in Python builtins
+     * This allows Python code to call back to Kotlin to update checkpoint state
+     */
+    private fun setupCheckpointCallback() {
+        val handler = checkpointHandlerRef.get()
+        if (handler != null) {
+            try {
+                // Create a Python function that calls back to Kotlin
+                val callbackCode = """
+def _create_checkpoint_callback(kotlin_update_func):
+    def checkpoint_callback(progress_percent, estimated_e, trials_completed, total_count, num_trials=0):
+        import builtins
+        # Store state in builtins for the checkpoint handler to read
+        builtins._checkpoint_state = {
+            'progress_percent': progress_percent,
+            'estimated_e': estimated_e,
+            'trials_completed': trials_completed,
+            'total_count': total_count,
+            'num_trials': num_trials
+        }
+    return checkpoint_callback
+
+import builtins
+builtins._checkpoint_callback = _create_checkpoint_callback(None)
+builtins._checkpoint_state = None
+""".trimIndent()
+                
+                builtinsModule?.callAttr("exec", callbackCode)
+                Log.d(TAG, "Checkpoint callback set up in Python builtins")
+                
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set up checkpoint callback: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Clean up checkpoint callback from Python builtins
+     */
+    private fun cleanupCheckpointCallback() {
+        try {
+            // Read final checkpoint state before cleanup
+            val finalState = builtinsModule?.get("_checkpoint_state")
+            if (finalState != null && finalState.toString() != "None") {
+                Log.d(TAG, "Final checkpoint state: $finalState")
+            }
+            
+            val cleanupCode = """
+import builtins
+if hasattr(builtins, '_checkpoint_callback'):
+    delattr(builtins, '_checkpoint_callback')
+if hasattr(builtins, '_checkpoint_state'):
+    delattr(builtins, '_checkpoint_state')
+""".trimIndent()
+            
+            builtinsModule?.callAttr("exec", cleanupCode)
+            Log.d(TAG, "Checkpoint callback cleaned up from Python builtins")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to clean up checkpoint callback: ${e.message}")
+        }
+    }
+    
+    /**
+     * Poll checkpoint state from Python and update handler
+     * This is called periodically by the checkpoint handler's monitoring loop
+     */
+    fun pollAndUpdateCheckpointState() {
+        val handler = checkpointHandlerRef.get() ?: return
+        
+        try {
+            val stateObj = builtinsModule?.get("_checkpoint_state")
+            if (stateObj != null && stateObj.toString() != "None") {
+                // Extract values from Python dict using .get() method instead of toJava(Map)
+                val progressPercent = stateObj.callAttr("get", "progress_percent", 0.0)?.toJava(Number::class.java)?.toFloat() ?: 0f
+                val estimatedE = stateObj.callAttr("get", "estimated_e", 0.0)?.toJava(Number::class.java)?.toDouble() ?: 0.0
+                val trialsCompleted = stateObj.callAttr("get", "trials_completed", 0)?.toJava(Number::class.java)?.toInt() ?: 0
+                val totalCount = stateObj.callAttr("get", "total_count", 0)?.toJava(Number::class.java)?.toLong() ?: 0L
+                val numTrials = stateObj.callAttr("get", "num_trials", 0)?.toJava(Number::class.java)?.toInt() ?: 0
+                
+                handler.updateState(
+                    CheckpointHandler.CheckpointState(
+                        trialsCompleted = trialsCompleted,
+                        totalCount = totalCount,
+                        numTrials = numTrials,
+                        progressPercent = progressPercent,
+                        estimatedE = estimatedE
+                    )
+                )
+                Log.d(TAG, "Checkpoint state polled: progress=$progressPercent%, trials=$trialsCompleted/$numTrials")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error polling checkpoint state: ${e.message}")
+        }
     }
     
     /**

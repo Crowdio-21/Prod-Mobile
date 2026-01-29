@@ -18,7 +18,7 @@ object MessageProtocol {
         const val PING = "ping"
         const val PONG = "pong"
         const val WORKER_HEARTBEAT = "worker_heartbeat"
-        const val WORKER_STATUS = "WORKER_STATUS"
+        const val WORKER_STATUS = "worker_status"
     }
     
     /**
@@ -193,7 +193,7 @@ object MessageProtocol {
         context: Context? = null
     ): String {
         return JSONObject().apply {
-            put("type", MessageType.PONG)
+            put("msg_type", MessageType.PONG)
             put("data", JSONObject().apply {
                 put("worker_id", workerId)
                 put("status", "online")
@@ -214,7 +214,7 @@ object MessageProtocol {
     
     /**
      * Parse incoming message
-     * Handles both "type" and "msg_type" fields for backward compatibility
+     * Handles both "type" and "type" fields for backward compatibility
      */
     fun parseMessage(message: String): MessageData? {
         return try {

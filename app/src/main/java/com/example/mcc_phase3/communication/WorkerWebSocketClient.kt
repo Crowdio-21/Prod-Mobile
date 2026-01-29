@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.execution.TaskProcessor
+import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import kotlinx.coroutines.*
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
@@ -57,6 +58,11 @@ class WorkerWebSocketClient(private val context: Context) {
                 if (!processorInitialized) {
                     Log.e(TAG, "Failed to initialize task processor")
                     return@withContext false
+                }
+                
+                // Set up checkpoint callback to send checkpoints via WebSocket
+                taskProcessor.setCheckpointCallback { checkpointMsg ->
+                    sendCheckpointMessage(checkpointMsg)
                 }
                 
                 // Disconnect if already connected
@@ -160,6 +166,28 @@ class WorkerWebSocketClient(private val context: Context) {
     }
     
     /**
+     * Send checkpoint message to foreman via WebSocket
+     */
+    private suspend fun sendCheckpointMessage(checkpoint: CheckpointMessage) {
+        withContext(Dispatchers.IO) {
+            try {
+                if (isConnected.get()) {
+                    val json = checkpoint.toJsonString()
+                    webSocket?.send(json)
+                    
+                    val checkpointType = if (checkpoint.isBase) "BASE" else "DELTA"
+                    Log.i(TAG, "📦 [Checkpoint] Task ${checkpoint.taskId} | $checkpointType #${checkpoint.checkpointId} | " +
+                            "Progress: ${checkpoint.progressPercent}%")
+                } else {
+                    Log.w(TAG, "⚠️ Cannot send checkpoint - not connected")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "⚠️ Error sending checkpoint: ${e.message}")
+            }
+        }
+    }
+    
+    /**
      * Register worker with backend
      */
     private fun registerWorker() {
@@ -204,6 +232,13 @@ class WorkerWebSocketClient(private val context: Context) {
                 }
                 MessageProtocol.MessageType.PING -> {
                     handlePing(messageData)
+                }
+                "CHECKPOINT_ACK" -> {
+                    // Checkpoint acknowledgment received, log for debugging
+                    val data = messageData.data
+                    val checkpointId = data?.optInt("checkpoint_id", -1) ?: -1
+                    val taskId = data?.optString("task_id", "") ?: ""
+                    Log.d(TAG, "✅ Checkpoint #$checkpointId acknowledged for task $taskId")
                 }
                 else -> {
                     Log.w(TAG, "Unknown message type: ${messageData.type}")
