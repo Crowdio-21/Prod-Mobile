@@ -102,6 +102,8 @@ class TaskProcessor(private val context: Context) {
                 
                 when (messageType) {
                     MessageProtocol.MessageType.ASSIGN_TASK -> processTaskAssignment(data, jobId)
+                    MessageProtocol.MessageType.RESUME_TASK -> processTaskResumption(data, jobId)
+                    MessageProtocol.MessageType.CHECKPOINT_ACK -> processCheckpointAck(data)
                     TASK_TYPE_CANCEL -> processTaskCancellation(data)
                     TASK_TYPE_STATUS -> processStatusRequest()
                     MessageProtocol.MessageType.WORKER_HEARTBEAT -> processHeartbeat()
@@ -208,6 +210,169 @@ class TaskProcessor(private val context: Context) {
                 jobId = jobId,
                 error = "Task execution failed: ${e.message ?: "Unknown error"}"
             )
+        }
+    }
+    
+    /**
+     * Process task resumption from checkpoint (RESUME_TASK message)
+     * This handles the foreman's request to resume a failed task from its last checkpoint
+     */
+    private suspend fun processTaskResumption(data: JSONObject?, jobId: String?): String {
+        val taskId = data?.optString("task_id", "") ?: ""
+        
+        return try {
+            if (data == null) {
+                return createErrorResponse("No task data provided for resumption")
+            }
+            
+            if (taskId.isEmpty()) {
+                return createErrorResponse("No task ID provided for resumption")
+            }
+            
+            // Check if we're already running a task
+            if (isTaskRunning.get()) {
+                Log.w(TAG, "Already running task ${currentTaskId.get()}, rejecting resumption $taskId")
+                return createErrorResponse("Worker is busy with task ${currentTaskId.get()}")
+            }
+            
+            Log.d(TAG, "🔄 Processing task resumption: $taskId")
+            
+            // Extract resumption data
+            val funcCode = data.optString("func_code", "")
+            val reconstructedStateHex = data.optString("reconstructed_state_hex", "")
+            val checkpointCount = data.optInt("checkpoint_count", 0)
+            val progressPercent = data.optDouble("progress_percent", 0.0)
+            
+            if (funcCode.isEmpty()) {
+                return createErrorResponse("No function code found in resume task")
+            }
+            
+            if (reconstructedStateHex.isEmpty()) {
+                return createErrorResponse("No reconstructed state found in resume task")
+            }
+            
+            Log.i(TAG, "📥 Resuming task $taskId from checkpoint #$checkpointCount (progress: $progressPercent%)")
+            
+            // Set current task and job
+            currentTaskId.set(taskId)
+            currentJobId.set(jobId)
+            isTaskRunning.set(true)
+            
+            try {
+                // Convert hex state back to bytes
+                val reconstructedStateBytes = hexStringToByteArray(reconstructedStateHex)
+                Log.d(TAG, "Reconstructed state size: ${reconstructedStateBytes.size} bytes")
+                
+                // Decompress state (foreman sends gzip-compressed state)
+                val decompressedState = decompressGzip(reconstructedStateBytes)
+                val stateJson = String(decompressedState, Charsets.UTF_8)
+                Log.d(TAG, "Decompressed state: ${stateJson.take(200)}...")
+                
+                // Start checkpoint monitoring (continuing from where we left off)
+                checkpointCallback?.let { callback ->
+                    pythonExecutor.setCheckpointHandler(checkpointHandler)
+                    
+                    // Initialize checkpoint handler with restored checkpoint count
+                    checkpointHandler.initializeFromCheckpoint(checkpointCount)
+                    
+                    checkpointHandler.startCheckpointMonitoring(
+                        taskId = taskId,
+                        jobId = jobId,
+                        workerId = workerIdManager.getCurrentWorkerId(),
+                        scope = processorScope,
+                        sendCheckpoint = callback,
+                        pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
+                    )
+                    Log.i(TAG, "✅ Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
+                }
+                
+                // Execute with restored state
+                // The function code should check for __restored_state__ in builtins
+                val executionResult = pythonExecutor.executeCodeWithRestoredState(
+                    funcCode, 
+                    stateJson
+                )
+                
+                // Create response
+                val response = MessageProtocol.createTaskResultMessage(
+                    taskId = taskId,
+                    jobId = jobId,
+                    result = executionResult["result"],
+                    executionTime = 0.0
+                )
+                
+                Log.d(TAG, "✅ Resumed task $taskId completed successfully")
+                response
+                
+            } finally {
+                // Stop checkpoint monitoring
+                checkpointHandler.stopCheckpointMonitoring()
+                pythonExecutor.setCheckpointHandler(null)
+                Log.i(TAG, "🛑 Checkpoint monitoring stopped for resumed task $taskId")
+                
+                // Clear current task and job
+                currentTaskId.set(null)
+                currentJobId.set(null)
+                isTaskRunning.set(false)
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing task resumption", e)
+            currentTaskId.set(null)
+            currentJobId.set(null)
+            isTaskRunning.set(false)
+            MessageProtocol.createTaskErrorMessage(
+                taskId = taskId,
+                jobId = jobId,
+                error = "Task resumption failed: ${e.message ?: "Unknown error"}"
+            )
+        }
+    }
+    
+    /**
+     * Process checkpoint acknowledgment from foreman
+     */
+    private fun processCheckpointAck(data: JSONObject?): String? {
+        return try {
+            val taskId = data?.optString("task_id", "") ?: ""
+            val checkpointId = data?.optInt("checkpoint_id", 0) ?: 0
+            
+            Log.d(TAG, "✅ Checkpoint #$checkpointId acknowledged for task $taskId")
+            
+            // No response needed for ACK messages
+            null
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Error processing checkpoint ACK: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Convert hex string to byte array
+     */
+    private fun hexStringToByteArray(hex: String): ByteArray {
+        val len = hex.length
+        val data = ByteArray(len / 2)
+        var i = 0
+        while (i < len) {
+            data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+            i += 2
+        }
+        return data
+    }
+    
+    /**
+     * Decompress GZIP data
+     */
+    private fun decompressGzip(compressed: ByteArray): ByteArray {
+        return try {
+            java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(compressed)).use { gis ->
+                gis.readBytes()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to decompress gzip, returning original: ${e.message}")
+            compressed
         }
     }
     

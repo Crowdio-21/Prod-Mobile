@@ -9,7 +9,7 @@ import org.json.JSONObject
  */
 object MessageProtocol {
     
-    // Message types matching backend format
+    // Message types matching backend format (lowercase to match foreman's MessageType enum values)
     object MessageType {
         const val WORKER_READY = "worker_ready"
         const val ASSIGN_TASK = "assign_task"
@@ -19,6 +19,8 @@ object MessageProtocol {
         const val PONG = "pong"
         const val WORKER_HEARTBEAT = "worker_heartbeat"
         const val WORKER_STATUS = "worker_status"
+        const val RESUME_TASK = "resume_task"        // Foreman -> Worker: Resume task from checkpoint
+        const val CHECKPOINT_ACK = "checkpoint_ack"  // Foreman -> Worker: Checkpoint received acknowledgment
     }
     
     /**

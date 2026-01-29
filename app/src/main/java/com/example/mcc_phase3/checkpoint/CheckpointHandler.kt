@@ -187,6 +187,21 @@ class CheckpointHandler(
         isBaseSent = false
         _currentState.value = null
     }
+    
+    /**
+     * Initialize from existing checkpoint (for task resumption)
+     * Called when resuming a failed task from checkpoint
+     * 
+     * @param existingCheckpointCount The checkpoint count from the foreman
+     */
+    fun initializeFromCheckpoint(existingCheckpointCount: Int) {
+        // Don't fully reset - preserve checkpoint count continuity
+        lastCheckpointState = null
+        checkpointCount = existingCheckpointCount
+        isBaseSent = true  // We're resuming, so base was already sent before failure
+        _currentState.value = null
+        Log.d(TAG, "Initialized from checkpoint #$existingCheckpointCount (resuming)")
+    }
 
     /**
      * Check if checkpoint monitoring is active

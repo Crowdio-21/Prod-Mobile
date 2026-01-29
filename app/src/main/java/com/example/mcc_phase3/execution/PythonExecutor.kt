@@ -184,6 +184,126 @@ class PythonExecutor(private val context: Context) {
             }
         }
     }
+    
+    /**
+     * Execute Python code with restored checkpoint state (for task resumption)
+     * 
+     * Sets up builtins.__restored_state__ with the checkpoint data before execution.
+     * The Python function should check for this and resume from where it left off.
+     * 
+     * @param funcCode Python function code
+     * @param restoredStateJson JSON string of the restored checkpoint state
+     * @return Execution result as Map
+     */
+    suspend fun executeCodeWithRestoredState(funcCode: String, restoredStateJson: String): Map<String, Any?> {
+        return withContext(Dispatchers.IO) {
+            try {
+                if (!isInitialized.get()) {
+                    val initialized = initialize()
+                    if (!initialized) {
+                        return@withContext mapOf<String, Any?>(
+                            "status" to "error",
+                            "message" to "Failed to initialize Python environment",
+                            "result" to null
+                        )
+                    }
+                }
+
+                Log.d(TAG, "🔄 Executing Python code with restored state...")
+                Log.d(TAG, "Restored state (first 200 chars): ${restoredStateJson.take(200)}...")
+
+                // Set up restored state in Python builtins
+                setupRestoredState(restoredStateJson)
+                
+                // Set up checkpoint callback for continued checkpointing
+                setupCheckpointCallback()
+                
+                // Parse the restored state to get task_args for execution
+                val stateObj = jsonModule?.callAttr("loads", restoredStateJson)
+                
+                // Execute the function code
+                var pythonCode = funcCode
+                
+                // Replace PyTorch/Transformers sentiment functions with TextBlob version for mobile
+                if (pythonCode.contains("import torch") && pythonCode.contains("sentiment_worker_pytorch")) {
+                    Log.d(TAG, "⚠️ Detected PyTorch sentiment function, replacing with mobile-compatible version")
+                    pythonCode = loadMobileSentimentWorker()
+                } else if (pythonCode.contains("from transformers import") || pythonCode.contains("import transformers")) {
+                    Log.d(TAG, "⚠️ Detected Transformers library usage, replacing with mobile-compatible version")
+                    pythonCode = getMobileCompatibleSentimentFunction()
+                }
+                
+                val result = executeFunctionCode(pythonCode, stateObj)
+                
+                // Clean up
+                cleanupRestoredState()
+                cleanupCheckpointCallback()
+
+                Log.d(TAG, "✅ Resumed Python code executed successfully")
+                mapOf<String, Any?>(
+                    "status" to "success",
+                    "message" to "Resumed execution completed successfully",
+                    "result" to result,
+                    "resumed" to true,
+                    "worker_id" to (workerIdManager.getCurrentWorkerId() ?: "unknown")
+                )
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to execute resumed Python code", e)
+                cleanupRestoredState()
+                cleanupCheckpointCallback()
+                mapOf<String, Any?>(
+                    "status" to "error",
+                    "message" to "Resumed execution failed: ${e.message ?: "Unknown error"}",
+                    "result" to null,
+                    "resumed" to true,
+                    "error" to e.toString()
+                )
+            }
+        }
+    }
+    
+    /**
+     * Set up restored state in Python builtins for task resumption
+     */
+    private fun setupRestoredState(stateJson: String) {
+        try {
+            val setupCode = """
+import builtins
+import json
+
+# Parse and store the restored state
+_restored_state_json = '''$stateJson'''
+builtins.__restored_state__ = json.loads(_restored_state_json)
+print(f"[Worker] Restored state loaded: {list(builtins.__restored_state__.keys())}")
+""".trimIndent()
+            
+            builtinsModule?.callAttr("exec", setupCode)
+            Log.d(TAG, "Restored state set up in Python builtins")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set up restored state: ${e.message}")
+        }
+    }
+    
+    /**
+     * Clean up restored state from Python builtins
+     */
+    private fun cleanupRestoredState() {
+        try {
+            val cleanupCode = """
+import builtins
+if hasattr(builtins, '__restored_state__'):
+    delattr(builtins, '__restored_state__')
+""".trimIndent()
+            
+            builtinsModule?.callAttr("exec", cleanupCode)
+            Log.d(TAG, "Restored state cleaned up from Python builtins")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to clean up restored state: ${e.message}")
+        }
+    }
 
     /**
      * Test Python execution with a simple function
