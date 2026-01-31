@@ -189,8 +189,12 @@ class CheckpointHandler(
     }
     
     /**
-     * Initialize from existing checkpoint (for task resumption)
+     * Initialize from existing checkpoint count (for task resumption)
      * Called when resuming a failed task from checkpoint
+     * The actual checkpoint state is pre-loaded into Python's builtins._checkpoint_state by PythonExecutor.
+     * The Python code handles extracting and using those values.
+     * This method just sets up checkpoint count continuity
+     * so new checkpoints are numbered correctly.
      * 
      * @param existingCheckpointCount The checkpoint count from the foreman
      */
@@ -200,7 +204,7 @@ class CheckpointHandler(
         checkpointCount = existingCheckpointCount
         isBaseSent = true  // We're resuming, so base was already sent before failure
         _currentState.value = null
-        Log.d(TAG, "Initialized from checkpoint #$existingCheckpointCount (resuming)")
+        Log.d(TAG, "Initialized checkpoint handler for resumption (starting from checkpoint #$existingCheckpointCount)")
     }
 
     /**

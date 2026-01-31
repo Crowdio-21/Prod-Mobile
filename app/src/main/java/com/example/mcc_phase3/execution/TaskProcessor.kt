@@ -7,6 +7,7 @@ import com.example.mcc_phase3.communication.MessageProtocol
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import kotlinx.coroutines.*
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -67,11 +68,11 @@ class TaskProcessor(private val context: Context) {
                 }
                 
                 isInitialized.set(true)
-                Log.d(TAG, "✅ TaskProcessor initialized successfully")
+                Log.d(TAG, " TaskProcessor initialized successfully")
                 true
                 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to initialize TaskProcessor", e)
+                Log.e(TAG, " Failed to initialize TaskProcessor", e)
                 false
             }
         }
@@ -171,7 +172,7 @@ class TaskProcessor(private val context: Context) {
                         sendCheckpoint = callback,
                         pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
                     )
-                    Log.i(TAG, "✅ Checkpoint monitoring started for task $taskId")
+                    Log.i(TAG, " Checkpoint monitoring started for task $taskId")
                 }
                 
                 // Execute the function code (matching desktop worker format)
@@ -185,14 +186,14 @@ class TaskProcessor(private val context: Context) {
                     executionTime = 0.0 // TODO: Calculate actual execution time
                 )
                 
-                Log.d(TAG, "✅ Task $taskId completed successfully")
+                Log.d(TAG, " Task $taskId completed successfully")
                 response
                 
             } finally {
                 // Stop checkpoint monitoring
                 checkpointHandler.stopCheckpointMonitoring()
                 pythonExecutor.setCheckpointHandler(null)
-                Log.i(TAG, "🛑 Checkpoint monitoring stopped for task $taskId (sent ${checkpointHandler.getCheckpointCount()} checkpoints)")
+                Log.i(TAG, " Checkpoint monitoring stopped for task $taskId (sent ${checkpointHandler.getCheckpointCount()} checkpoints)")
                 
                 // Clear current task and job
                 currentTaskId.set(null)
@@ -235,23 +236,86 @@ class TaskProcessor(private val context: Context) {
                 return createErrorResponse("Worker is busy with task ${currentTaskId.get()}")
             }
             
-            Log.d(TAG, "🔄 Processing task resumption: $taskId")
+            Log.d(TAG, " Processing task resumption: $taskId")
             
             // Extract resumption data
             val funcCode = data.optString("func_code", "")
-            val reconstructedStateHex = data.optString("reconstructed_state_hex", "")
             val checkpointCount = data.optInt("checkpoint_count", 0)
-            val progressPercent = data.optDouble("progress_percent", 0.0)
+            val isResumed = data.optBoolean("is_resumed", true)
+            
+            // Get checkpoint_state as JSON object (new format)
+            val checkpointStateObj = data.optJSONObject("checkpoint_state")
+            
+            // Get task_args/args - the ORIGINAL function arguments
+            // This is separate from checkpoint_state and contains the arguments
+            // Foreman sends args as "args" (resume) or "task_args" (assign)
+            val argsArray: JSONArray? = when {
+                data.optJSONArray("args") != null -> data.getJSONArray("args")
+                data.optJSONArray("task_args") != null -> data.getJSONArray("task_args")
+                data.optString("args", "").isNotEmpty() -> {
+                    val argsStr = data.getString("args")
+                    JSONArray(if (argsStr.trim().startsWith("[")) argsStr else "[$argsStr]")
+                }
+                data.optString("task_args", "").isNotEmpty() -> {
+                    val argsStr = data.getString("task_args")
+                    JSONArray(if (argsStr.trim().startsWith("[")) argsStr else "[$argsStr]")
+                }
+                else -> null
+            }
+
+            // Get kwargs if present (resume message supports "kwargs")
+            val kwargsObj = data.optJSONObject("kwargs")
+
+            // Build taskArgsJson in the desktop worker shape: [args, kwargs] when kwargs exist
+            val taskArgsJson: String = if (kwargsObj != null && kwargsObj.length() > 0) {
+                val combined = JSONArray()
+                combined.put(argsArray ?: JSONArray())
+                combined.put(kwargsObj)
+                combined.toString()
+            } else {
+                argsArray?.toString() ?: "[]"
+            }
+            
+            // Also support legacy format with reconstructed_state_hex
+            val reconstructedStateHex = data.optString("reconstructed_state_hex", "")
             
             if (funcCode.isEmpty()) {
                 return createErrorResponse("No function code found in resume task")
             }
             
-            if (reconstructedStateHex.isEmpty()) {
-                return createErrorResponse("No reconstructed state found in resume task")
+            if (taskArgsJson == "[]") {
+                Log.w(TAG, "No args found in resume_task message - foreman should include original args (checked both 'task_args' and 'args' fields)")
+            } else {
+                Log.d(TAG, "Found task args: $taskArgsJson")
             }
             
-            Log.i(TAG, "📥 Resuming task $taskId from checkpoint #$checkpointCount (progress: $progressPercent%)")
+            // Determine checkpoint state JSON
+            val checkpointStateJson: String = when {
+                checkpointStateObj != null -> {
+                    // New format: checkpoint_state is already decoded JSON
+                    Log.d(TAG, "Using new checkpoint_state format")
+                    checkpointStateObj.toString()
+                }
+                reconstructedStateHex.isNotEmpty() -> {
+                    // Legacy format: hex-encoded gzip-compressed state
+                    Log.d(TAG, "Using legacy reconstructed_state_hex format")
+                    val reconstructedStateBytes = hexStringToByteArray(reconstructedStateHex)
+                    val decompressedState = decompressGzip(reconstructedStateBytes)
+                    String(decompressedState, Charsets.UTF_8)
+                }
+                else -> {
+                    return createErrorResponse("No checkpoint state found in resume task")
+                }
+            }
+            
+            // Extract progress from checkpoint state for logging
+            val progressPercent = checkpointStateObj?.optDouble("progress_percent", 0.0) 
+                ?: data.optDouble("progress_percent", 0.0)
+            
+            Log.i(TAG, "   Resuming task $taskId from checkpoint #$checkpointCount")
+            Log.i(TAG, "   Progress: $progressPercent%")
+            Log.i(TAG, "   Checkpoint state keys: ${checkpointStateObj?.keys()?.asSequence()?.toList() ?: "N/A"}")
+            Log.i(TAG, "   Task args: $taskArgsJson")
             
             // Set current task and job
             currentTaskId.set(taskId)
@@ -259,20 +323,11 @@ class TaskProcessor(private val context: Context) {
             isTaskRunning.set(true)
             
             try {
-                // Convert hex state back to bytes
-                val reconstructedStateBytes = hexStringToByteArray(reconstructedStateHex)
-                Log.d(TAG, "Reconstructed state size: ${reconstructedStateBytes.size} bytes")
-                
-                // Decompress state (foreman sends gzip-compressed state)
-                val decompressedState = decompressGzip(reconstructedStateBytes)
-                val stateJson = String(decompressedState, Charsets.UTF_8)
-                Log.d(TAG, "Decompressed state: ${stateJson.take(200)}...")
-                
                 // Start checkpoint monitoring (continuing from where we left off)
                 checkpointCallback?.let { callback ->
                     pythonExecutor.setCheckpointHandler(checkpointHandler)
                     
-                    // Initialize checkpoint handler with restored checkpoint count
+                    // Initialize checkpoint handler for resumption
                     checkpointHandler.initializeFromCheckpoint(checkpointCount)
                     
                     checkpointHandler.startCheckpointMonitoring(
@@ -283,14 +338,16 @@ class TaskProcessor(private val context: Context) {
                         sendCheckpoint = callback,
                         pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
                     )
-                    Log.i(TAG, "✅ Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
+                    Log.i(TAG, " Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
                 }
                 
                 // Execute with restored state
-                // The function code should check for __restored_state__ in builtins
+                // - checkpointStateJson: sets up builtins._checkpoint_state with _is_resumed=True
+                // - taskArgsJson: the original function arguments
                 val executionResult = pythonExecutor.executeCodeWithRestoredState(
-                    funcCode, 
-                    stateJson
+                    funcCode = funcCode, 
+                    checkpointStateJson = checkpointStateJson,
+                    taskArgsJson = taskArgsJson
                 )
                 
                 // Create response
@@ -301,14 +358,14 @@ class TaskProcessor(private val context: Context) {
                     executionTime = 0.0
                 )
                 
-                Log.d(TAG, "✅ Resumed task $taskId completed successfully")
+                Log.d(TAG, " Resumed task $taskId completed successfully")
                 response
                 
             } finally {
                 // Stop checkpoint monitoring
                 checkpointHandler.stopCheckpointMonitoring()
                 pythonExecutor.setCheckpointHandler(null)
-                Log.i(TAG, "🛑 Checkpoint monitoring stopped for resumed task $taskId")
+                Log.i(TAG, " Checkpoint monitoring stopped for resumed task $taskId")
                 
                 // Clear current task and job
                 currentTaskId.set(null)
@@ -337,7 +394,7 @@ class TaskProcessor(private val context: Context) {
             val taskId = data?.optString("task_id", "") ?: ""
             val checkpointId = data?.optInt("checkpoint_id", 0) ?: 0
             
-            Log.d(TAG, "✅ Checkpoint #$checkpointId acknowledged for task $taskId")
+            Log.d(TAG, " Checkpoint #$checkpointId acknowledged for task $taskId")
             
             // No response needed for ACK messages
             null
@@ -629,7 +686,7 @@ class TaskProcessor(private val context: Context) {
             isTaskRunning.set(false)
             isInitialized.set(false)
             pythonExecutor.cleanup()
-            Log.d(TAG, "✅ TaskProcessor cleaned up")
+            Log.d(TAG, " TaskProcessor cleaned up")
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }

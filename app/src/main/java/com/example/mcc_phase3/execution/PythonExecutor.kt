@@ -188,14 +188,19 @@ class PythonExecutor(private val context: Context) {
     /**
      * Execute Python code with restored checkpoint state (for task resumption)
      * 
-     * Sets up builtins.__restored_state__ with the checkpoint data before execution.
+     * Sets up builtins._checkpoint_state with the checkpoint data and _is_resumed=True flag.
      * The Python function should check for this and resume from where it left off.
      * 
      * @param funcCode Python function code
-     * @param restoredStateJson JSON string of the restored checkpoint state
+     * @param checkpointStateJson JSON string of the checkpoint state (for setting up builtins._checkpoint_state)
+     * @param taskArgsJson JSON string of the original task arguments (for calling the function)
      * @return Execution result as Map
      */
-    suspend fun executeCodeWithRestoredState(funcCode: String, restoredStateJson: String): Map<String, Any?> {
+    suspend fun executeCodeWithRestoredState(
+        funcCode: String, 
+        checkpointStateJson: String,
+        taskArgsJson: String
+    ): Map<String, Any?> {
         return withContext(Dispatchers.IO) {
             try {
                 if (!isInitialized.get()) {
@@ -209,19 +214,21 @@ class PythonExecutor(private val context: Context) {
                     }
                 }
 
-                Log.d(TAG, "🔄 Executing Python code with restored state...")
-                Log.d(TAG, "Restored state (first 200 chars): ${restoredStateJson.take(200)}...")
+                Log.d(TAG, "Executing Python code with restored state...")
+                Log.d(TAG, "Checkpoint state (first 200 chars): ${checkpointStateJson.take(200)}...")
+                Log.d(TAG, "Task args: $taskArgsJson")
 
-                // Set up restored state in Python builtins
-                setupRestoredState(restoredStateJson)
+                // Set up checkpoint state in Python builtins._checkpoint_state with _is_resumed flag
+                // This is separate from task_args - it's only for the Python code to detect resumption
+                setupRestoredState(checkpointStateJson)
                 
                 // Set up checkpoint callback for continued checkpointing
                 setupCheckpointCallback()
                 
-                // Parse the restored state to get task_args for execution
-                val stateObj = jsonModule?.callAttr("loads", restoredStateJson)
+                // Parse the task_args for function execution (NOT the checkpoint state)
+                val taskArgs = jsonModule?.callAttr("loads", taskArgsJson)
                 
-                // Execute the function code
+                // Execute the function code with the original task args
                 var pythonCode = funcCode
                 
                 // Replace PyTorch/Transformers sentiment functions with TextBlob version for mobile
@@ -233,13 +240,13 @@ class PythonExecutor(private val context: Context) {
                     pythonCode = getMobileCompatibleSentimentFunction()
                 }
                 
-                val result = executeFunctionCode(pythonCode, stateObj)
+                val result = executeFunctionCode(pythonCode, taskArgs)
                 
                 // Clean up
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
 
-                Log.d(TAG, "✅ Resumed Python code executed successfully")
+                Log.d(TAG, "Resumed Python code executed successfully")
                 mapOf<String, Any?>(
                     "status" to "success",
                     "message" to "Resumed execution completed successfully",
@@ -249,7 +256,7 @@ class PythonExecutor(private val context: Context) {
                 )
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to execute resumed Python code", e)
+                Log.e(TAG, "Failed to execute resumed Python code", e)
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
                 mapOf<String, Any?>(
@@ -264,22 +271,32 @@ class PythonExecutor(private val context: Context) {
     }
     
     /**
-     * Set up restored state in Python builtins for task resumption
+     * Set up checkpoint state in Python builtins._checkpoint_state for task resumption
+     * 
+     * This sets the checkpoint state with _is_resumed = True flag so the Python
+     * function can detect it's resuming and continue from the saved state.
      */
     private fun setupRestoredState(stateJson: String) {
         try {
-            val setupCode = """
-import builtins
-import json
+            val stateObj = jsonModule?.callAttr("loads", stateJson)
+            if (stateObj == null) {
+                Log.w(TAG, "Failed to parse checkpoint state JSON; stateObj is null")
+                return
+            }
 
-# Parse and store the restored state
-_restored_state_json = '''$stateJson'''
-builtins.__restored_state__ = json.loads(_restored_state_json)
-print(f"[Worker] Restored state loaded: {list(builtins.__restored_state__.keys())}")
-""".trimIndent()
-            
-            builtinsModule?.callAttr("exec", setupCode)
-            Log.d(TAG, "Restored state set up in Python builtins")
+            // Set the _is_resumed flag so the Python function knows to resume
+            try {
+                stateObj.put("_is_resumed", true)
+            } catch (e: Exception) {
+                // Fallback for dict-like objects without put
+                stateObj.callAttr("__setitem__", "_is_resumed", true)
+            }
+
+            // Store in builtins so Python code can read it
+            builtinsModule?.put("_checkpoint_state", stateObj)
+
+            val keys = stateObj.callAttr("keys")?.toString() ?: "unknown"
+            Log.d(TAG, "Checkpoint state set up in Python builtins._checkpoint_state with _is_resumed=True. Keys: $keys")
             
         } catch (e: Exception) {
             Log.w(TAG, "Failed to set up restored state: ${e.message}")
@@ -287,18 +304,30 @@ print(f"[Worker] Restored state loaded: {list(builtins.__restored_state__.keys()
     }
     
     /**
-     * Clean up restored state from Python builtins
+     * Clean up restored state flag from Python builtins
      */
     private fun cleanupRestoredState() {
         try {
-            val cleanupCode = """
-import builtins
-if hasattr(builtins, '__restored_state__'):
-    delattr(builtins, '__restored_state__')
-""".trimIndent()
-            
-            builtinsModule?.callAttr("exec", cleanupCode)
-            Log.d(TAG, "Restored state cleaned up from Python builtins")
+            val stateObj = builtinsModule?.get("_checkpoint_state")
+            if (stateObj != null) {
+                val builtins = pythonInstance?.getModule("builtins")
+                val dictType = builtins?.get("dict")
+                val isDict = builtins?.callAttr("isinstance", stateObj, dictType)?.toJava(Boolean::class.java) == true
+                if (isDict) {
+                    // Remove _is_resumed if present
+                    try {
+                        stateObj.callAttr("pop", "_is_resumed", null)
+                    } catch (e: Exception) {
+                        // Fallback if pop fails
+                        try {
+                            stateObj.callAttr("__delitem__", "_is_resumed")
+                        } catch (_: Exception) {
+                            // Ignore if missing
+                        }
+                    }
+                }
+            }
+            Log.d(TAG, "Checkpoint state _is_resumed flag cleaned up from Python builtins")
             
         } catch (e: Exception) {
             Log.w(TAG, "Failed to clean up restored state: ${e.message}")

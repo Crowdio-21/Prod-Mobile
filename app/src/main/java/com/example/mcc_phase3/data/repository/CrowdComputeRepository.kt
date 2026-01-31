@@ -122,8 +122,8 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             val jobs = apiService.getJobs(skip, limit)
             val duration = System.currentTimeMillis() - startTime
 
-            Log.d(TAG, "✅ getJobs() successful in ${duration}ms")
-            Log.d(TAG, "💼 Retrieved ${jobs.size} jobs")
+//            Log.d(TAG, "getJobs() successful in ${duration}ms")
+//            Log.d(TAG, "Retrieved ${jobs.size} jobs")
             jobs.forEachIndexed { index, job ->
                 Log.v(TAG, "💼 Job[$index]: id=${job.id}, status=${job.status}, progress=${job.completedTasks}/${job.totalTasks}")
             }
@@ -256,7 +256,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
     }
 
     suspend fun getWorkers(): Result<List<Worker>> = withContext(Dispatchers.IO) {
-        Log.d(TAG, "👷 getWorkers() called")
+//        Log.d(TAG, "getWorkers() called")
         ApiClient.logApiCall(context, "/api/workers")
 
         try {
@@ -266,16 +266,16 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             val workers = apiService.getWorkers()
             val duration = System.currentTimeMillis() - startTime
 
-            Log.d(TAG, "✅ getWorkers() successful in ${duration}ms")
-            Log.d(TAG, "👷 Retrieved ${workers.size} workers")
+//            Log.d(TAG, "getWorkers() successful in ${duration}ms")
+//            Log.d(TAG, "Retrieved ${workers.size} workers")
 
             val onlineCount = workers.count { it.status == "online" }
             val offlineCount = workers.size - onlineCount
-            Log.d(TAG, "👷 Worker status: $onlineCount online, $offlineCount offline")
-
-            workers.forEachIndexed { index, worker ->
-                Log.v(TAG, "👷 Worker[$index]: id=${worker.id}, status=${worker.status}, task=${worker.currentTaskId}")
-            }
+//            Log.d(TAG, "Worker status: $onlineCount online, $offlineCount offline")
+//
+//            workers.forEachIndexed { index, worker ->
+//                Log.v(TAG, "Worker[$index]: id=${worker.id}, status=${worker.status}, task=${worker.currentTaskId}")
+//            }
             ApiClient.logApiSuccess("/api/workers", 200, workers.size)
             
             resetCircuitBreakerOnSuccess()

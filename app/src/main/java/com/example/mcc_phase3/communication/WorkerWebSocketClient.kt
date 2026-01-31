@@ -230,10 +230,13 @@ class WorkerWebSocketClient(private val context: Context) {
                 MessageProtocol.MessageType.ASSIGN_TASK -> {
                     handleTaskAssignment(messageData)
                 }
+                MessageProtocol.MessageType.RESUME_TASK -> {
+                    handleTaskResumption(messageData)
+                }
                 MessageProtocol.MessageType.PING -> {
                     handlePing(messageData)
                 }
-                "CHECKPOINT_ACK" -> {
+                MessageProtocol.MessageType.CHECKPOINT_ACK -> {
                     // Checkpoint acknowledgment received, log for debugging
                     val data = messageData.data
                     val checkpointId = data?.optInt("checkpoint_id", -1) ?: -1
@@ -298,6 +301,65 @@ class WorkerWebSocketClient(private val context: Context) {
                 taskId = data?.optString("task_id", "") ?: "unknown",
                 jobId = messageData.jobId,
                 error = "Task assignment failed: ${e.message ?: "Unknown error"}"
+            )
+            sendMessage(errorResponse)
+        }
+    }
+    
+    /**
+     * Handle task resumption from foreman (resume from checkpoint)
+     */
+    private suspend fun handleTaskResumption(messageData: MessageProtocol.MessageData) {
+        val data = messageData.data
+        
+        try {
+            if (data == null) {
+                Log.w(TAG, "No data in task resumption message")
+                return
+            }
+            
+            val taskId = data.optString("task_id", "")
+            val jobId = messageData.jobId
+            val funcCode = data.optString("func_code", "")
+            val taskArgs = data.optString("task_args", "")
+            
+            Log.d(TAG, "Received task RESUMPTION: $taskId for job: $jobId")
+            Log.d(TAG, "Function code length: ${funcCode.length}, Task args: $taskArgs")
+            
+            // Check if checkpoint data is present
+            val checkpointData = data.optString("checkpoint_data", null)
+            val checkpointCount = data.optInt("checkpoint_count", 0)
+            if (checkpointData != null) {
+                Log.d(TAG, "Checkpoint data present, resuming from checkpoint #$checkpointCount")
+            }
+            
+            // Create a proper resume_task message for TaskProcessor
+            val taskMessage = JSONObject().apply {
+                put("type", MessageProtocol.MessageType.RESUME_TASK)
+                put("data", data)
+                if (jobId != null) {
+                    put("job_id", jobId)
+                }
+                put("timestamp", System.currentTimeMillis())
+            }.toString()
+            
+            // Process the task resumption through TaskProcessor
+            val response = taskProcessor.processTaskMessage(taskMessage)
+            
+            // Send response back to backend
+            response?.let { resp ->
+                sendMessage(resp)
+                Log.d(TAG, "Task result sent (resumed): $resp")
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling task resumption", e)
+            
+            // Send error response
+            val errorResponse = MessageProtocol.createTaskErrorMessage(
+                taskId = data?.optString("task_id", "") ?: "unknown",
+                jobId = messageData.jobId,
+                error = "Task resumption failed: ${e.message ?: "Unknown error"}"
             )
             sendMessage(errorResponse)
         }
