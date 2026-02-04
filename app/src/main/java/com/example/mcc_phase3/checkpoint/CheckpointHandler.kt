@@ -4,6 +4,7 @@ import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPOutputStream
@@ -14,12 +15,19 @@ import java.util.zip.GZIPInputStream
  * 
  * Captures task state periodically, computes deltas, and sends
  * checkpoint messages to foreman without blocking task execution.
+ * 
+ * Supports:
+ * - Configuration from task_metadata (declarative checkpointing)
+ * - BASE and DELTA checkpoint types
+ * - JSON serialization for cross-platform compatibility
+ * - State variable filtering based on declared checkpoint_state vars
  */
 class CheckpointHandler(
-    private val checkpointIntervalMs: Long = 5000L // 5 seconds default
+    private var checkpointIntervalMs: Long = 5000L // 5 seconds default
 ) {
     companion object {
         private const val TAG = "CheckpointHandler"
+        private const val SERIALIZATION_FORMAT = "json"  // For cross-platform compatibility
     }
 
     // Checkpoint state
@@ -27,6 +35,10 @@ class CheckpointHandler(
     private var checkpointCount = 0
     private var isBaseSent = false
     private var checkpointJob: Job? = null
+    
+    // Task metadata configuration
+    private var taskMetadata: TaskMetadata? = null
+    private var checkpointStateVars: List<String> = emptyList()
 
     // Current state accessible by task executor
     private val _currentState = MutableStateFlow<CheckpointState?>(null)
@@ -68,6 +80,32 @@ class CheckpointHandler(
     fun updateState(state: CheckpointState) {
         _currentState.value = state
     }
+    
+    /**
+     * Configure checkpoint handler from task metadata
+     * Call this before starting checkpoint monitoring if task_metadata is available
+     */
+    fun configure(metadata: TaskMetadata) {
+        taskMetadata = metadata
+        checkpointStateVars = metadata.checkpointState
+        
+        // Update interval from metadata (convert seconds to milliseconds)
+        if (metadata.checkpointInterval > 0) {
+            checkpointIntervalMs = (metadata.checkpointInterval * 1000).toLong()
+        }
+        
+        Log.d(TAG, "Configured from task_metadata: " +
+                "enabled=${metadata.checkpointEnabled}, " +
+                "interval=${checkpointIntervalMs}ms, " +
+                "vars=${checkpointStateVars}")
+    }
+    
+    /**
+     * Check if checkpointing is enabled (from task_metadata or default)
+     */
+    fun isCheckpointingEnabled(): Boolean {
+        return taskMetadata?.checkpointEnabled ?: true  // Default to enabled if no metadata
+    }
 
     /**
      * Start periodic checkpoint monitoring
@@ -107,9 +145,10 @@ class CheckpointHandler(
                     if (state != null) {
                         Log.d(TAG, "Got state for task $taskId: progress=${state.progressPercent}%")
 
-                        // Serialize and compress state
-                        val stateJson = state.toJson().toString()
-                        val compressed = compressGzip(stateJson.toByteArray(Charsets.UTF_8))
+                        // Serialize state to JSON, optionally filtering to declared vars
+                        val stateJson = filterAndSerializeState(state)
+                        val stateBytes = stateJson.toByteArray(Charsets.UTF_8)
+                        val compressed = compressGzip(stateBytes)
 
                         val checkpointMsg = if (!isBaseSent) {
                             // Send base checkpoint first
@@ -125,10 +164,14 @@ class CheckpointHandler(
                                 jobId = jobId,
                                 workerId = workerId,
                                 isBase = true,
+                                checkpointType = "base",
                                 progressPercent = state.progressPercent,
                                 checkpointId = checkpointCount,
                                 deltaDataHex = compressed.toHexString(),
-                                compressionType = "gzip"
+                                compressionType = "gzip",
+                                serializationFormat = SERIALIZATION_FORMAT,
+                                checkpointStateVars = checkpointStateVars,
+                                stateSizeBytes = stateBytes.size
                             )
                         } else {
                             // Compute and send delta
@@ -144,10 +187,14 @@ class CheckpointHandler(
                                 jobId = jobId,
                                 workerId = workerId,
                                 isBase = false,
+                                checkpointType = "delta",
                                 progressPercent = state.progressPercent,
                                 checkpointId = checkpointCount,
                                 deltaDataHex = deltaBytes.toHexString(),
-                                compressionType = "gzip"
+                                compressionType = "gzip",
+                                serializationFormat = SERIALIZATION_FORMAT,
+                                checkpointStateVars = checkpointStateVars,
+                                stateSizeBytes = stateBytes.size
                             )
                         }
 
@@ -170,22 +217,38 @@ class CheckpointHandler(
     }
 
     /**
-     * Stop checkpoint monitoring
+     * Stop checkpoint monitoring and reset for next task
      */
     fun stopCheckpointMonitoring() {
         checkpointJob?.cancel()
         checkpointJob = null
+        // Full reset to prepare for next task
+        fullReset()
         Log.d(TAG, "Checkpoint monitoring stopped")
     }
 
     /**
      * Reset checkpoint state (for new task)
+     * NOTE: Does NOT reset taskMetadata or checkpointStateVars because those are
+     * configured via configure() BEFORE startCheckpointMonitoring() is called.
      */
     fun reset() {
         lastCheckpointState = null
         checkpointCount = 0
         isBaseSent = false
         _currentState.value = null
+        // NOTE: Don't clear taskMetadata and checkpointStateVars here!
+        // They are set by configure() before startCheckpointMonitoring() is called,
+        // and need to persist through the monitoring session.
+    }
+    
+    /**
+     * Full reset including configuration (for use between tasks)
+     */
+    fun fullReset() {
+        reset()
+        taskMetadata = null
+        checkpointStateVars = emptyList()
     }
     
     /**
@@ -219,6 +282,43 @@ class CheckpointHandler(
      */
     fun getCheckpointCount(): Int {
         return checkpointCount
+    }
+    
+    /**
+     * Get the configured checkpoint state variables.
+     * Returns empty list if no specific variables are configured (capture all).
+     */
+    fun getCheckpointStateVars(): List<String> {
+        return checkpointStateVars
+    }
+    
+    /**
+     * Filter and serialize state to JSON string.
+     * If checkpointStateVars is configured, only include those variables.
+     * Otherwise, include all state variables.
+     */
+    private fun filterAndSerializeState(state: CheckpointState): String {
+        val fullJson = state.toJson()
+        
+        // If no specific vars configured, return full state
+        if (checkpointStateVars.isEmpty()) {
+            return fullJson.toString()
+        }
+        
+        // Filter to only declared checkpoint_state variables
+        val filteredJson = JSONObject()
+        for (varName in checkpointStateVars) {
+            if (fullJson.has(varName)) {
+                filteredJson.put(varName, fullJson.get(varName))
+            }
+        }
+        
+        // Always include progress_percent for tracking
+        if (fullJson.has("progress_percent") && !filteredJson.has("progress_percent")) {
+            filteredJson.put("progress_percent", fullJson.get("progress_percent"))
+        }
+        
+        return filteredJson.toString()
     }
 
     /**
@@ -286,23 +386,34 @@ class CheckpointHandler(
 }
 
 /**
- * Checkpoint message to send to foreman
+ * Checkpoint message to send to foreman.
+ * 
+ * Extended format with support for:
+ * - checkpoint_type: "base", "delta", or "compacted"
+ * - serialization_format: "json" for cross-platform compatibility
+ * - checkpoint_state_vars: list of declared variables in checkpoint
+ * - state_size_bytes: uncompressed state size
  */
 data class CheckpointMessage(
     val taskId: String,
     val jobId: String?,
     val workerId: String?,
     val isBase: Boolean,
+    val checkpointType: String = if (isBase) "base" else "delta",  // "base", "delta", or "compacted"
     val progressPercent: Float,
     val checkpointId: Int,
     val deltaDataHex: String,
-    val compressionType: String = "gzip"
+    val compressionType: String = "gzip",
+    val serializationFormat: String = "json",      // "json" or "pickle"
+    val checkpointStateVars: List<String> = emptyList(),  // Variables included in checkpoint
+    val stateSizeBytes: Int = 0                    // Uncompressed state size
 ) {
     /**
      * Convert to JSON string for WebSocket transmission
      * Must match foreman's expected format:
      * - "type" field (not "msg_type")
      * - lowercase enum value "task_checkpoint" (matching MessageType.TASK_CHECKPOINT.value)
+     * - "serialization_format" MUST be at the data level so foreman knows to use JSON (not pickle)
      */
     fun toJsonString(): String {
         return JSONObject().apply {
@@ -312,10 +423,16 @@ data class CheckpointMessage(
                 put("task_id", taskId)
                 put("worker_id", workerId)
                 put("is_base", isBase)
+                put("checkpoint_type", checkpointType)
                 put("progress_percent", progressPercent)
                 put("checkpoint_id", checkpointId)
                 put("delta_data_hex", deltaDataHex)
                 put("compression_type", compressionType)
+                // CRITICAL: serialization_format tells foreman to use json.loads() instead of pickle.loads()
+                // Without this, foreman will try to unpickle the JSON data and fail
+                put("serialization_format", serializationFormat)
+                put("checkpoint_state_vars", JSONArray(checkpointStateVars))
+                put("state_size_bytes", stateSizeBytes)
             })
         }.toString()
     }

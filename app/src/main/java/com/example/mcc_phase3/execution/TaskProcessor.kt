@@ -6,6 +6,7 @@ import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.communication.MessageProtocol
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
+import com.example.mcc_phase3.checkpoint.TaskMetadata
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference
  * - Parsing task messages from backend
  * - Routing tasks to appropriate handlers
  * - Managing task execution flow
+ * - Configuring checkpointing from task_metadata
  * - NOT executing Python code (delegated to PythonExecutor)
  */
 class TaskProcessor(private val context: Context) {
@@ -149,6 +151,16 @@ class TaskProcessor(private val context: Context) {
             val funcCode = data.optString("func_code", "")
             val taskArgs = data.optString("task_args", "")
             
+            // Parse task_metadata if present (declarative checkpointing configuration)
+            val taskMetadataJson = data.optJSONObject("task_metadata")
+            val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
+            
+            if (taskMetadataJson != null) {
+                Log.d(TAG, "Task metadata: checkpoint_enabled=${taskMetadata.checkpointEnabled}, " +
+                        "interval=${taskMetadata.checkpointInterval}s, " +
+                        "vars=${taskMetadata.checkpointState}")
+            }
+            
             if (funcCode.isEmpty()) {
                 return createErrorResponse("No function code found in task")
             }
@@ -159,20 +171,30 @@ class TaskProcessor(private val context: Context) {
             isTaskRunning.set(true)
             
             try {
-                // Start checkpoint monitoring if callback is set
+                // Start checkpoint monitoring if callback is set and checkpointing is enabled
                 checkpointCallback?.let { callback ->
-                    // Pass checkpoint handler to Python executor for progress updates
-                    pythonExecutor.setCheckpointHandler(checkpointHandler)
+                    // Configure checkpoint handler from task_metadata if present
+                    if (taskMetadataJson != null) {
+                        checkpointHandler.configure(taskMetadata)
+                    }
                     
-                    checkpointHandler.startCheckpointMonitoring(
-                        taskId = taskId,
-                        jobId = jobId,
-                        workerId = workerIdManager.getCurrentWorkerId(),
-                        scope = processorScope,
-                        sendCheckpoint = callback,
-                        pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
-                    )
-                    Log.i(TAG, " Checkpoint monitoring started for task $taskId")
+                    // Only start monitoring if checkpointing is enabled
+                    if (checkpointHandler.isCheckpointingEnabled()) {
+                        // Pass checkpoint handler to Python executor for progress updates
+                        pythonExecutor.setCheckpointHandler(checkpointHandler)
+                        
+                        checkpointHandler.startCheckpointMonitoring(
+                            taskId = taskId,
+                            jobId = jobId,
+                            workerId = workerIdManager.getCurrentWorkerId(),
+                            scope = processorScope,
+                            sendCheckpoint = callback,
+                            pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
+                        )
+                        Log.i(TAG, "✅ Checkpoint monitoring started for task $taskId")
+                    } else {
+                        Log.d(TAG, "Checkpointing disabled for task $taskId (per task_metadata)")
+                    }
                 }
                 
                 // Execute the function code (matching desktop worker format)
@@ -217,6 +239,23 @@ class TaskProcessor(private val context: Context) {
     /**
      * Process task resumption from checkpoint (RESUME_TASK message)
      * This handles the foreman's request to resume a failed task from its last checkpoint
+     * 
+     * Expected message format:
+     * {
+     *   "type": "resume_task",
+     *   "job_id": "job-uuid",
+     *   "data": {
+     *     "task_id": "task-uuid",
+     *     "func_code": "def worker_fn(x): ...",
+     *     "args": [...],
+     *     "kwargs": {...},
+     *     "checkpoint_state": { ... reconstructed state ... },
+     *     "checkpoint_count": 4,
+     *     "progress_percent": 50.0,
+     *     "recovery_status": "resumed",
+     *     "task_metadata": { ... checkpointing config ... }
+     *   }
+     * }
      */
     private suspend fun processTaskResumption(data: JSONObject?, jobId: String?): String {
         val taskId = data?.optString("task_id", "") ?: ""
@@ -236,12 +275,23 @@ class TaskProcessor(private val context: Context) {
                 return createErrorResponse("Worker is busy with task ${currentTaskId.get()}")
             }
             
-            Log.d(TAG, " Processing task resumption: $taskId")
+            Log.d(TAG, "🔄 Processing task resumption: $taskId")
             
             // Extract resumption data
             val funcCode = data.optString("func_code", "")
             val checkpointCount = data.optInt("checkpoint_count", 0)
             val isResumed = data.optBoolean("is_resumed", true)
+            val recoveryStatus = data.optString("recovery_status", "resumed")
+            
+            // Parse task_metadata if present (declarative checkpointing configuration)
+            val taskMetadataJson = data.optJSONObject("task_metadata")
+            val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
+            
+            if (taskMetadataJson != null) {
+                Log.d(TAG, "Task metadata: checkpoint_enabled=${taskMetadata.checkpointEnabled}, " +
+                        "interval=${taskMetadata.checkpointInterval}s, " +
+                        "vars=${taskMetadata.checkpointState}")
+            }
             
             // Get checkpoint_state as JSON object (new format)
             val checkpointStateObj = data.optJSONObject("checkpoint_state")
@@ -312,8 +362,9 @@ class TaskProcessor(private val context: Context) {
             val progressPercent = checkpointStateObj?.optDouble("progress_percent", 0.0) 
                 ?: data.optDouble("progress_percent", 0.0)
             
-            Log.i(TAG, "   Resuming task $taskId from checkpoint #$checkpointCount")
+            Log.i(TAG, "📥 Resuming task $taskId from checkpoint #$checkpointCount")
             Log.i(TAG, "   Progress: $progressPercent%")
+            Log.i(TAG, "   Recovery status: $recoveryStatus")
             Log.i(TAG, "   Checkpoint state keys: ${checkpointStateObj?.keys()?.asSequence()?.toList() ?: "N/A"}")
             Log.i(TAG, "   Task args: $taskArgsJson")
             
@@ -325,20 +376,30 @@ class TaskProcessor(private val context: Context) {
             try {
                 // Start checkpoint monitoring (continuing from where we left off)
                 checkpointCallback?.let { callback ->
-                    pythonExecutor.setCheckpointHandler(checkpointHandler)
+                    // Configure checkpoint handler from task_metadata if present
+                    if (taskMetadataJson != null) {
+                        checkpointHandler.configure(taskMetadata)
+                    }
                     
-                    // Initialize checkpoint handler for resumption
-                    checkpointHandler.initializeFromCheckpoint(checkpointCount)
-                    
-                    checkpointHandler.startCheckpointMonitoring(
-                        taskId = taskId,
-                        jobId = jobId,
-                        workerId = workerIdManager.getCurrentWorkerId(),
-                        scope = processorScope,
-                        sendCheckpoint = callback,
-                        pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
-                    )
-                    Log.i(TAG, " Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
+                    // Only start monitoring if checkpointing is enabled
+                    if (checkpointHandler.isCheckpointingEnabled()) {
+                        pythonExecutor.setCheckpointHandler(checkpointHandler)
+                        
+                        // Initialize checkpoint handler for resumption (continues numbering from where left off)
+                        checkpointHandler.initializeFromCheckpoint(checkpointCount)
+                        
+                        checkpointHandler.startCheckpointMonitoring(
+                            taskId = taskId,
+                            jobId = jobId,
+                            workerId = workerIdManager.getCurrentWorkerId(),
+                            scope = processorScope,
+                            sendCheckpoint = callback,
+                            pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
+                        )
+                        Log.i(TAG, "✅ Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
+                    } else {
+                        Log.d(TAG, "Checkpointing disabled for resumed task $taskId (per task_metadata)")
+                    }
                 }
                 
                 // Execute with restored state
@@ -350,22 +411,23 @@ class TaskProcessor(private val context: Context) {
                     taskArgsJson = taskArgsJson
                 )
                 
-                // Create response
-                val response = MessageProtocol.createTaskResultMessage(
+                // Create response with recovery_status for resumed tasks
+                val response = MessageProtocol.createTaskResultMessageWithRecoveryStatus(
                     taskId = taskId,
                     jobId = jobId,
                     result = executionResult["result"],
-                    executionTime = 0.0
+                    executionTime = 0.0,
+                    recoveryStatus = recoveryStatus
                 )
                 
-                Log.d(TAG, " Resumed task $taskId completed successfully")
+                Log.d(TAG, "✅ Resumed task $taskId completed successfully")
                 response
                 
             } finally {
                 // Stop checkpoint monitoring
                 checkpointHandler.stopCheckpointMonitoring()
                 pythonExecutor.setCheckpointHandler(null)
-                Log.i(TAG, " Checkpoint monitoring stopped for resumed task $taskId")
+                Log.i(TAG, "🛑 Checkpoint monitoring stopped for resumed task $taskId")
                 
                 // Clear current task and job
                 currentTaskId.set(null)

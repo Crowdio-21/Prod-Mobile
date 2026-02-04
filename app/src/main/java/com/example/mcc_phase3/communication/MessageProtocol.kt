@@ -26,6 +26,11 @@ object MessageProtocol {
     /**
      * Create a worker ready message with device specifications
      * Enhanced to use DeviceInfoCollector for comprehensive device info
+     * 
+     * CRITICAL for foreman integration:
+     * - worker_type: "android_chaquopy" tells foreman that sys.settrace doesn't work
+     *   and code needs instrumentation for checkpoint callbacks
+     * - capabilities: tells foreman what checkpoint format this worker uses
      */
     fun createWorkerReadyMessage(
         workerId: String,
@@ -38,6 +43,21 @@ object MessageProtocol {
             put("type", MessageType.WORKER_READY)
             put("data", JSONObject().apply {
                 put("worker_id", workerId)
+                
+                // CRITICAL: Tell foreman this is an Android/Chaquopy worker
+                // Foreman uses this to instrument code with explicit checkpoint callbacks
+                // since sys.settrace() doesn't work on Chaquopy
+                put("worker_type", "android_chaquopy")
+                
+                // Worker capabilities for checkpoint system
+                put("capabilities", JSONObject().apply {
+                    put("supports_checkpointing", true)
+                    put("checkpoint_format", "json")       // JSON format for cross-platform compatibility
+                    put("supports_resume", true)           // Can resume tasks from checkpoint state
+                    put("supports_delta_checkpoints", true) // Supports incremental delta checkpoints
+                    put("compression_supported", "gzip")   // Compression type for checkpoint data
+                })
+                
                 put("device_specs", JSONObject(specs.toMap()))
             })
             put("timestamp", System.currentTimeMillis())
@@ -129,6 +149,45 @@ object MessageProtocol {
                 put("execution_time", executionTime)
             })
             // Always include job_id field, even if null (backend expects this field)
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
+        }.toString()
+    }
+    
+    /**
+     * Create a task result message with recovery_status for resumed tasks
+     */
+    fun createTaskResultMessageWithRecoveryStatus(
+        taskId: String,
+        jobId: String?,
+        result: Any?,
+        executionTime: Double = 0.0,
+        recoveryStatus: String = "resumed"
+    ): String {
+        return JSONObject().apply {
+            put("type", MessageType.TASK_RESULT)
+            put("data", JSONObject().apply {
+                put("task_id", taskId)
+                // Handle result properly - if it's already a JSON string, parse it
+                val resultValue = when (result) {
+                    is String -> {
+                        try {
+                            if (result.trim().startsWith("{") || result.trim().startsWith("[")) {
+                                JSONObject(result)
+                            } else {
+                                result
+                            }
+                        } catch (e: Exception) {
+                            result
+                        }
+                    }
+                    null -> JSONObject.NULL
+                    else -> result.toString()
+                }
+                put("result", resultValue)
+                put("execution_time", executionTime)
+                put("recovery_status", recoveryStatus)  // Indicate this was a resumed task
+            })
             put("job_id", jobId)
             put("timestamp", System.currentTimeMillis())
         }.toString()

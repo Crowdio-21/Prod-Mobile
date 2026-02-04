@@ -69,6 +69,68 @@ class PythonExecutor(private val context: Context) {
     }
     
     /**
+     * Configure checkpoint capture for a specific function.
+     * On Android, this sets up the state variables to capture but does NOT use sys.settrace()
+     * since it's not supported in Chaquopy. Instead, we rely on code instrumentation.
+     * 
+     * @param funcName The name of the function to trace
+     * @param checkpointStateVars List of variable names to capture (empty = capture common vars)
+     */
+    fun configureCheckpointTrace(funcName: String, checkpointStateVars: List<String> = emptyList()) {
+        try {
+            val stateVarsList = checkpointStateVars.joinToString(",") { "'$it'" }
+            val configCode = """
+import builtins
+
+# Configure the function name (for reference)
+builtins._checkpoint_func_name = '${funcName}'
+
+# Configure which variables to capture
+builtins._checkpoint_state_vars = [${stateVarsList}]
+
+# NOTE: On Android/Chaquopy, sys.settrace() is NOT reliable
+# The checkpoint state must be updated via explicit callback calls
+# Either manually in user code or via code instrumentation
+
+print("[Android Worker] Checkpoint configured for function: ${funcName}, vars: [${stateVarsList}]")
+print("[Android Worker] State will be captured via explicit builtins._checkpoint_callback() calls")
+""".trimIndent()
+            
+            // IMPORTANT: exec() on Chaquopy requires explicit globals dict to avoid "frame does not exist" error
+            val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            builtinsModule?.callAttr("exec", configCode, globalDict)
+            Log.d(TAG, "Checkpoint configured for function: $funcName, vars: $checkpointStateVars (no trace - Android mode)")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to configure checkpoint: ${e.message}")
+        }
+    }
+    
+    /**
+     * Disable checkpoint capture after task execution.
+     * On Android, this just clears the function name since we don't use sys.settrace()
+     */
+    fun disableCheckpointTrace() {
+        try {
+            val disableCode = """
+import builtins
+
+# Clear the function name
+builtins._checkpoint_func_name = None
+print("[Android Worker] Checkpoint capture disabled")
+""".trimIndent()
+            
+            // IMPORTANT: exec() on Chaquopy requires explicit globals dict to avoid "frame does not exist" error
+            val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            builtinsModule?.callAttr("exec", disableCode, globalDict)
+            Log.d(TAG, "Checkpoint capture disabled")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to disable checkpoint capture: ${e.message}")
+        }
+    }
+    
+    /**
      * Initialize Python environment
      */
     suspend fun initialize(): Boolean {
@@ -240,7 +302,8 @@ class PythonExecutor(private val context: Context) {
                     pythonCode = getMobileCompatibleSentimentFunction()
                 }
                 
-                val result = executeFunctionCode(pythonCode, taskArgs)
+                // Execute with isResume=true to inject resume logic
+                val result = executeFunctionCode(pythonCode, taskArgs, isResume = true)
                 
                 // Clean up
                 cleanupRestoredState()
@@ -390,35 +453,71 @@ class PythonExecutor(private val context: Context) {
     }
     
     /**
-     * Set up checkpoint callback in Python builtins
-     * This allows Python code to call back to Kotlin to update checkpoint state
+     * Set up checkpoint state capture in Python builtins.
+     * 
+     * This uses sys.settrace() to automatically capture local variables from the
+     * executing function on each line, storing them in builtins._checkpoint_state.
+     * This matches the PC worker's approach and requires NO changes to user code.
+     * 
+     * Also provides a fallback callback for explicit updates if needed.
      */
     private fun setupCheckpointCallback() {
         val handler = checkpointHandlerRef.get()
         if (handler != null) {
             try {
-                // Create a Python function that calls back to Kotlin
-                val callbackCode = """
-def _create_checkpoint_callback(kotlin_update_func):
-    def checkpoint_callback(progress_percent, estimated_e, trials_completed, total_count, num_trials=0):
-        import builtins
-        # Store state in builtins for the checkpoint handler to read
-        builtins._checkpoint_state = {
-            'progress_percent': progress_percent,
-            'estimated_e': estimated_e,
-            'trials_completed': trials_completed,
-            'total_count': total_count,
-            'num_trials': num_trials
-        }
-    return checkpoint_callback
-
+                // Set up explicit callback-based checkpoint capture for Android
+                // NOTE: sys.settrace() doesn't work reliably on Chaquopy/Android
+                // So we use explicit callback + code instrumentation approach
+                val setupCode = """
 import builtins
-builtins._checkpoint_callback = _create_checkpoint_callback(None)
-builtins._checkpoint_state = None
+
+# Initialize checkpoint state storage ONLY if not already set (preserve resume state!)
+# This is critical for task resumption - don't overwrite the restored checkpoint state
+if not hasattr(builtins, '_checkpoint_state') or not builtins._checkpoint_state:
+    builtins._checkpoint_state = {}
+elif hasattr(builtins, '_checkpoint_state') and builtins._checkpoint_state.get('_is_resumed', False):
+    print(f"[Android Worker] Preserving existing checkpoint state for resume: {list(builtins._checkpoint_state.keys())}")
+
+builtins._checkpoint_func_name = None
+builtins._checkpoint_state_vars = []  # Will be set by task metadata
+builtins._checkpoint_update_counter = 0  # Track number of updates
+
+def _checkpoint_callback(progress_percent=0.0, estimated_e=0.0, trials_completed=0, 
+                         total_count=0, num_trials=0, **kwargs):
+    '''
+    Explicit checkpoint callback - updates builtins._checkpoint_state.
+    This is the primary mechanism for Android since sys.settrace() does not work.
+    '''
+    state = {
+        'progress_percent': float(progress_percent),
+        'estimated_e': float(estimated_e),
+        'trials_completed': int(trials_completed),
+        'total_count': int(total_count),
+        'num_trials': int(num_trials)
+    }
+    state.update(kwargs)  # Allow additional custom fields
+    builtins._checkpoint_state = state
+    builtins._checkpoint_update_counter += 1
+
+def _update_checkpoint_state(**kwargs):
+    '''
+    Alternative simpler API - just pass the variables to checkpoint.
+    '''
+    current = getattr(builtins, '_checkpoint_state', {})
+    current.update(kwargs)
+    builtins._checkpoint_state = current
+    builtins._checkpoint_update_counter = getattr(builtins, '_checkpoint_update_counter', 0) + 1
+
+builtins._checkpoint_callback = _checkpoint_callback
+builtins._update_checkpoint_state = _update_checkpoint_state
+
+print("[Android Worker] Checkpoint callback initialized (explicit callback mode)")
 """.trimIndent()
                 
-                builtinsModule?.callAttr("exec", callbackCode)
-                Log.d(TAG, "Checkpoint callback set up in Python builtins")
+                // IMPORTANT: exec() on Chaquopy requires explicit globals dict to avoid "frame does not exist" error
+                val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+                builtinsModule?.callAttr("exec", setupCode, globalDict)
+                Log.d(TAG, "Checkpoint callback set up in Python builtins (explicit mode)")
                 
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to set up checkpoint callback: ${e.message}")
@@ -427,25 +526,35 @@ builtins._checkpoint_state = None
     }
     
     /**
-     * Clean up checkpoint callback from Python builtins
+     * Clean up checkpoint callback and trace from Python builtins
      */
     private fun cleanupCheckpointCallback() {
         try {
-            // Read final checkpoint state before cleanup
-            val finalState = builtinsModule?.get("_checkpoint_state")
-            if (finalState != null && finalState.toString() != "None") {
+            // Read final checkpoint state before cleanup using getattr
+            val finalState = builtinsModule?.callAttr("getattr",
+                pythonInstance?.getModule("builtins"),
+                "_checkpoint_state",
+                null
+            )
+            if (finalState != null && finalState.toString() != "None" && finalState.toString() != "null") {
                 Log.d(TAG, "Final checkpoint state: $finalState")
             }
             
             val cleanupCode = """
 import builtins
-if hasattr(builtins, '_checkpoint_callback'):
-    delattr(builtins, '_checkpoint_callback')
-if hasattr(builtins, '_checkpoint_state'):
-    delattr(builtins, '_checkpoint_state')
+
+# Clean up builtins attributes (no trace to remove since we don't use sys.settrace on Android)
+for attr in ['_checkpoint_callback', '_checkpoint_state', '_update_checkpoint_state',
+             '_checkpoint_func_name', '_checkpoint_state_vars', '_checkpoint_update_counter']:
+    if hasattr(builtins, attr):
+        delattr(builtins, attr)
+
+print("[Android Worker] Checkpoint callback cleaned up")
 """.trimIndent()
             
-            builtinsModule?.callAttr("exec", cleanupCode)
+            // IMPORTANT: exec() on Chaquopy requires explicit globals dict to avoid "frame does not exist" error
+            val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            builtinsModule?.callAttr("exec", cleanupCode, globalDict)
             Log.d(TAG, "Checkpoint callback cleaned up from Python builtins")
             
         } catch (e: Exception) {
@@ -454,36 +563,119 @@ if hasattr(builtins, '_checkpoint_state'):
     }
     
     /**
-     * Poll checkpoint state from Python and update handler
-     * This is called periodically by the checkpoint handler's monitoring loop
+     * Poll checkpoint state from Python and update handler.
+     * This is called periodically by the checkpoint handler's monitoring loop.
+     * 
+     * Reads from builtins._checkpoint_state which is updated by:
+     * - Explicitly calling builtins._checkpoint_callback(...) or builtins._update_checkpoint_state(...)
+     * - Code instrumentation that auto-injects checkpoint calls at strategic points
      */
     fun pollAndUpdateCheckpointState() {
         val handler = checkpointHandlerRef.get() ?: return
         
         try {
-            val stateObj = builtinsModule?.get("_checkpoint_state")
-            if (stateObj != null && stateObj.toString() != "None") {
-                // Extract values from Python dict using .get() method instead of toJava(Map)
-                val progressPercent = stateObj.callAttr("get", "progress_percent", 0.0)?.toJava(Number::class.java)?.toFloat() ?: 0f
-                val estimatedE = stateObj.callAttr("get", "estimated_e", 0.0)?.toJava(Number::class.java)?.toDouble() ?: 0.0
-                val trialsCompleted = stateObj.callAttr("get", "trials_completed", 0)?.toJava(Number::class.java)?.toInt() ?: 0
-                val totalCount = stateObj.callAttr("get", "total_count", 0)?.toJava(Number::class.java)?.toLong() ?: 0L
-                val numTrials = stateObj.callAttr("get", "num_trials", 0)?.toJava(Number::class.java)?.toInt() ?: 0
+            // Use getattr to properly read builtins._checkpoint_state
+            // builtinsModule.get() doesn't work for dynamically set attributes
+            val stateObj = builtinsModule?.callAttr("getattr", 
+                pythonInstance?.getModule("builtins"), 
+                "_checkpoint_state", 
+                null  // default value if not found
+            )
+            
+            if (stateObj != null && stateObj.toString() != "None" && stateObj.toString() != "null" && stateObj.toString() != "{}") {
+                // Extract values from Python dict using .get() method with safe defaults
+                val progressPercent = safeGetFloat(stateObj, "progress_percent", 0f)
+                val estimatedE = safeGetDouble(stateObj, "estimated_e", 0.0)
+                val trialsCompleted = safeGetInt(stateObj, "trials_completed", 0)
+                val totalCount = safeGetLong(stateObj, "total_count", 0L)
+                val numTrials = safeGetInt(stateObj, "num_trials", 0)
+                
+                // Also try to get common alternative field names
+                val count = safeGetInt(stateObj, "count", trialsCompleted)
+                val total = safeGetLong(stateObj, "total", totalCount)
+                
+                // Build custom data map for any additional fields
+                val customData = mutableMapOf<String, Any>()
+                try {
+                    val keys = stateObj.callAttr("keys")
+                    val keysList = keys?.asList() ?: emptyList<PyObject>()
+                    for (key in keysList) {
+                        val keyStr = key.toString()
+                        if (keyStr !in listOf("progress_percent", "estimated_e", "trials_completed", 
+                                              "total_count", "num_trials", "count", "total")) {
+                            val value = stateObj.callAttr("get", keyStr)
+                            if (value != null && value.toString() != "None") {
+                                customData[keyStr] = convertPyObjectToJava(value)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Ignore errors when extracting custom data
+                }
                 
                 handler.updateState(
                     CheckpointHandler.CheckpointState(
-                        trialsCompleted = trialsCompleted,
-                        totalCount = totalCount,
+                        trialsCompleted = if (count > trialsCompleted) count else trialsCompleted,
+                        totalCount = if (total > totalCount) total else totalCount,
                         numTrials = numTrials,
                         progressPercent = progressPercent,
-                        estimatedE = estimatedE
+                        estimatedE = estimatedE,
+                        customData = if (customData.isNotEmpty()) customData else null
                     )
                 )
-                Log.d(TAG, "Checkpoint state polled: progress=$progressPercent%, trials=$trialsCompleted/$numTrials")
+                Log.d(TAG, "Checkpoint state polled: progress=$progressPercent%, trials=$trialsCompleted/$numTrials, custom=${customData.keys}")
+            } else {
+                Log.d(TAG, "No checkpoint state found in Python builtins (state is empty or null)")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error polling checkpoint state: ${e.message}")
         }
+    }
+    
+    /** Safely extract float from Python dict */
+    private fun safeGetFloat(dict: PyObject, key: String, default: Float): Float {
+        return try {
+            dict.callAttr("get", key, default)?.toJava(Number::class.java)?.toFloat() ?: default
+        } catch (e: Exception) { default }
+    }
+    
+    /** Safely extract double from Python dict */
+    private fun safeGetDouble(dict: PyObject, key: String, default: Double): Double {
+        return try {
+            dict.callAttr("get", key, default)?.toJava(Number::class.java)?.toDouble() ?: default
+        } catch (e: Exception) { default }
+    }
+    
+    /** Safely extract int from Python dict */
+    private fun safeGetInt(dict: PyObject, key: String, default: Int): Int {
+        return try {
+            dict.callAttr("get", key, default)?.toJava(Number::class.java)?.toInt() ?: default
+        } catch (e: Exception) { default }
+    }
+    
+    /** Safely extract long from Python dict */
+    private fun safeGetLong(dict: PyObject, key: String, default: Long): Long {
+        return try {
+            dict.callAttr("get", key, default)?.toJava(Number::class.java)?.toLong() ?: default
+        } catch (e: Exception) { default }
+    }
+    
+    /** Convert PyObject to Java object */
+    private fun convertPyObjectToJava(obj: PyObject): Any {
+        // Try numeric types first
+        try {
+            val numVal = obj.toJava(Number::class.java)
+            if (numVal != null) return numVal
+        } catch (_: Exception) { }
+        
+        // Try boolean
+        try {
+            val boolVal = obj.toJava(Boolean::class.java)
+            if (boolVal != null) return boolVal
+        } catch (_: Exception) { }
+        
+        // Fallback to string
+        return obj.toString()
     }
     
     /**
@@ -783,15 +975,353 @@ def sentiment_analysis_worker(message_data):
     }
     
     /**
+     * Instrument Python code to automatically update checkpoint state AND support resumption.
+     * Since sys.settrace() doesn't work on Android/Chaquopy, we inject explicit
+     * checkpoint callback calls at strategic points in the code (after variable updates
+     * that update progress_percent or similar checkpoint variables).
+     * 
+     * For resumption support, we also inject code at the start of the function to:
+     * 1. Check if builtins._checkpoint_state exists with _is_resumed=True
+     * 2. If so, restore variables from checkpoint and adjust loop starting point
+     * 
+     * @param funcCode The original Python function code
+     * @param checkpointStateVars Variables to capture for checkpointing
+     * @param isResume Whether this is a resume execution (inject resume logic)
+     * @return Instrumented Python code with checkpoint callbacks and optional resume logic
+     */
+    private fun instrumentCodeForCheckpointing(
+        funcCode: String, 
+        checkpointStateVars: List<String>,
+        isResume: Boolean = false
+    ): String {
+        if (checkpointStateVars.isEmpty()) {
+            return funcCode
+        }
+        
+        try {
+            val lines = funcCode.lines().toMutableList()
+            val instrumentedLines = mutableListOf<String>()
+            
+            var foundProgressUpdate = false
+            var addedImport = false
+            var addedResumeLogic = false
+            var inDocstring = false
+            var docstringDelimiter = ""
+            var passedDocstring = false
+            var functionBodyIndent = "    "
+            
+            lineLoop@ for ((index, line) in lines.withIndex()) {
+                val trimmed = line.trim()
+                
+                // Detect function definition
+                if (trimmed.startsWith("def ") && trimmed.contains("(")) {
+                    instrumentedLines.add(line)
+                    inDocstring = false
+                    passedDocstring = false
+                    addedImport = false
+                    addedResumeLogic = false
+                    continue
+                }
+                
+                // Handle multi-line docstrings
+                if (!passedDocstring) {
+                    // Check for docstring start
+                    if (!inDocstring && (trimmed.startsWith("\"\"\"") || trimmed.startsWith("'''"))) {
+                        docstringDelimiter = if (trimmed.startsWith("\"\"\"")) "\"\"\"" else "'''"
+                        inDocstring = true
+                        instrumentedLines.add(line)
+                        
+                        // Check if docstring ends on same line (single-line docstring)
+                        val afterDelimiter = trimmed.substring(3)
+                        if (afterDelimiter.contains(docstringDelimiter)) {
+                            inDocstring = false
+                            passedDocstring = true
+                        }
+                        continue
+                    }
+                    
+                    // Check for docstring end in multi-line docstring
+                    if (inDocstring && trimmed.contains(docstringDelimiter)) {
+                        inDocstring = false
+                        passedDocstring = true
+                        instrumentedLines.add(line)
+                        continue
+                    }
+                    
+                    // Still in docstring
+                    if (inDocstring) {
+                        instrumentedLines.add(line)
+                        continue
+                    }
+                }
+                
+                // Past docstring - add import and resume logic if needed
+                if (!addedImport && passedDocstring && !line.isBlank()) {
+                    functionBodyIndent = line.takeWhile { it == ' ' || it == '\t' }
+                    if (functionBodyIndent.isEmpty()) functionBodyIndent = "    "
+                    
+                    // Add import builtins before this line
+                    if (!funcCode.contains("import builtins")) {
+                        instrumentedLines.add("${functionBodyIndent}import builtins  # Injected for checkpoint support")
+                    }
+                    addedImport = true
+                    
+                    // Add resume logic if this is a resume execution
+                    if (isResume && !addedResumeLogic) {
+                        addResumeLogic(instrumentedLines, functionBodyIndent, checkpointStateVars)
+                        addedResumeLogic = true
+                    }
+                }
+                
+                // If no docstring and first non-blank line, add import
+                if (!addedImport && !passedDocstring && !inDocstring && !line.isBlank() && 
+                    !trimmed.startsWith("\"\"\"") && !trimmed.startsWith("'''")) {
+                    passedDocstring = true  // No docstring case
+                    functionBodyIndent = line.takeWhile { it == ' ' || it == '\t' }
+                    if (functionBodyIndent.isEmpty()) functionBodyIndent = "    "
+                    
+                    if (!funcCode.contains("import builtins")) {
+                        instrumentedLines.add("${functionBodyIndent}import builtins  # Injected for checkpoint support")
+                    }
+                    addedImport = true
+                    
+                    // Add resume logic if this is a resume execution
+                    if (isResume && !addedResumeLogic) {
+                        addResumeLogic(instrumentedLines, functionBodyIndent, checkpointStateVars)
+                        addedResumeLogic = true
+                    }
+                }
+                
+                // When resuming, skip original initializations of checkpoint variables
+                // These are restored from checkpoint state, so we comment them out
+                if (isResume && addedResumeLogic) {
+                    // Check if this line is initializing a checkpoint variable with a literal value
+                    // Match patterns like: "varname = 0", "varname = 0.0", "varname = []", etc.
+                    val initMatch = Regex("^(\\s*)(\\w+)\\s*=\\s*(.+)$").find(line)
+                    if (initMatch != null) {
+                        val varName = initMatch.groupValues[2]
+                        val value = initMatch.groupValues[3].trim()
+                        val lineIndent = initMatch.groupValues[1]
+                        
+                        // Check if this is a checkpoint variable being initialized to a default value
+                        if (varName in checkpointStateVars && isDefaultInitialization(value)) {
+                            // Comment out the original and add conditional initialization using _is_resuming flag
+                            // This flag is set by our injected resume logic
+                            instrumentedLines.add("${lineIndent}# Original: $varName = $value (skipped during resume)")
+                            instrumentedLines.add("${lineIndent}if not _is_resuming:")
+                            instrumentedLines.add("${lineIndent}    $varName = $value")
+                            Log.d(TAG, "Made checkpoint var initialization conditional: $varName = $value")
+                            // Don't add the original line, continue to next
+                            continue@lineLoop
+                        }
+                    }
+                }
+                
+                // Modify main loop to start from _resume_start_index when resuming
+                // Look for patterns like "for i in range(num_trials)" or "for i in range(n)"
+                if (isResume && trimmed.matches(Regex("for\\s+\\w+\\s+in\\s+range\\s*\\(\\s*\\w+\\s*\\)\\s*:"))) {
+                    // Extract the loop variable and range argument
+                    val forMatch = Regex("for\\s+(\\w+)\\s+in\\s+range\\s*\\(\\s*(\\w+)\\s*\\)").find(trimmed)
+                    if (forMatch != null) {
+                        val loopVar = forMatch.groupValues[1]
+                        val rangeArg = forMatch.groupValues[2]
+                        val indent = line.takeWhile { it == ' ' || it == '\t' }
+                        // Modify to use _resume_start_index as start
+                        val modifiedLine = "${indent}for $loopVar in range(_resume_start_index, $rangeArg):"
+                        instrumentedLines.add(modifiedLine)
+                        Log.d(TAG, "Modified loop to resume from _resume_start_index: $trimmed -> for $loopVar in range(_resume_start_index, $rangeArg)")
+                        // Skip adding the original line since we added the modified one
+                        continue@lineLoop
+                    } else {
+                        instrumentedLines.add(line)
+                    }
+                } else {
+                    instrumentedLines.add(line)
+                }
+                
+                // Check if this line updates progress_percent - that's the key variable to trigger checkpoint
+                if (!trimmed.startsWith("#") && 
+                    line.contains("progress_percent") && 
+                    line.contains("=") && 
+                    !line.contains("==") && 
+                    !line.contains("_update_checkpoint_state") &&
+                    !line.contains("_checkpoint_callback")) {
+                    
+                    foundProgressUpdate = true
+                    
+                    // Get the indentation of this line
+                    val indent = line.takeWhile { it == ' ' || it == '\t' }
+                    
+                    // Build checkpoint callback with all state vars
+                    // Each line must have exactly the same base indentation
+                    val callbackArgs = checkpointStateVars.joinToString(", ") { "$it=$it" }
+                    val callbackLines = listOf(
+                        "${indent}try:",
+                        "${indent}    if hasattr(builtins, '_update_checkpoint_state'):",
+                        "${indent}        builtins._update_checkpoint_state($callbackArgs)",
+                        "${indent}except: pass"
+                    )
+                    
+                    // Inject the callback after the progress update line
+                    val nextLine = lines.getOrNull(index + 1)?.trim() ?: ""
+                    if (!nextLine.contains("_update_checkpoint_state") && !nextLine.contains("_checkpoint_callback")) {
+                        callbackLines.forEach { instrumentedLines.add(it) }
+                        Log.d(TAG, "Injected checkpoint callback after line ${index + 1}: progress_percent update")
+                    }
+                }
+            }
+            
+            if (!foundProgressUpdate) {
+                Log.d(TAG, "No progress_percent updates found in code, checkpoint state will need manual updates")
+            }
+            
+            return instrumentedLines.joinToString("\n")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to instrument code for checkpointing: ${e.message}")
+            return funcCode // Return original if instrumentation fails
+        }
+    }
+    
+    /**
+     * Add resume logic to instrumented code.
+     * This injects Python code that:
+     * 1. Checks if builtins._checkpoint_state exists with _is_resumed=True
+     * 2. Restores checkpoint variables from the saved state
+     * 3. Sets _resume_start_index for loops to continue from correct position
+     */
+    private fun addResumeLogic(
+        instrumentedLines: MutableList<String>,
+        indent: String,
+        checkpointStateVars: List<String>
+    ) {
+        // Add resume detection and variable restoration code
+        instrumentedLines.add("${indent}# === INJECTED RESUME LOGIC (Android Worker) ===")
+        instrumentedLines.add("${indent}_resume_start_index = 0")
+        instrumentedLines.add("${indent}_is_resuming = False")
+        
+        // Initialize checkpoint variables to their default values first
+        // These will be overwritten if we're resuming
+        for (varName in checkpointStateVars) {
+            // Don't initialize here - let the original code do it (or our conditional)
+        }
+        
+        // Check if we're resuming and restore state
+        instrumentedLines.add("${indent}try:")
+        instrumentedLines.add("${indent}    import builtins as _resume_builtins")
+        instrumentedLines.add("${indent}    _cp_state = getattr(_resume_builtins, '_checkpoint_state', None)")
+        instrumentedLines.add("${indent}    print(f'[Android Worker] Resume check: _cp_state exists = {_cp_state is not None}')")
+        instrumentedLines.add("${indent}    if _cp_state is not None:")
+        instrumentedLines.add("${indent}        print(f'[Android Worker] _cp_state type = {type(_cp_state)}, keys = {list(_cp_state.keys()) if hasattr(_cp_state, \"keys\") else \"N/A\"}')")
+        instrumentedLines.add("${indent}        _is_resumed_flag = _cp_state.get('_is_resumed', False) if hasattr(_cp_state, 'get') else False")
+        instrumentedLines.add("${indent}        print(f'[Android Worker] _is_resumed flag = {_is_resumed_flag} (type: {type(_is_resumed_flag)})')")
+        instrumentedLines.add("${indent}        if _is_resumed_flag:")
+        instrumentedLines.add("${indent}            _is_resuming = True")
+        instrumentedLines.add("${indent}            print('[Android Worker] ✅ Resuming from checkpoint - restoring state...')")
+        
+        // Restore each checkpoint variable
+        for (varName in checkpointStateVars) {
+            instrumentedLines.add("${indent}            if '$varName' in _cp_state:")
+            instrumentedLines.add("${indent}                $varName = _cp_state['$varName']")
+            instrumentedLines.add("${indent}                print(f'[Android Worker] ✅ Restored $varName = {$varName}')")
+        }
+        
+        // Set resume start index based on trials_completed
+        instrumentedLines.add("${indent}            # Set loop start index for resumption")
+        instrumentedLines.add("${indent}            if 'trials_completed' in _cp_state:")
+        instrumentedLines.add("${indent}                _resume_start_index = int(_cp_state['trials_completed'])")
+        instrumentedLines.add("${indent}                print(f'[Android Worker] ✅ Will resume from iteration {_resume_start_index}')")
+        instrumentedLines.add("${indent}        else:")
+        instrumentedLines.add("${indent}            print('[Android Worker] Not resuming - _is_resumed flag is False or missing')")
+        instrumentedLines.add("${indent}    else:")
+        instrumentedLines.add("${indent}        print('[Android Worker] Not resuming - no checkpoint state found')")
+        instrumentedLines.add("${indent}except Exception as _resume_err:")
+        instrumentedLines.add("${indent}    print(f'[Android Worker] Resume logic error: {_resume_err}')")
+        instrumentedLines.add("${indent}# === END RESUME LOGIC ===")
+        instrumentedLines.add("")
+        
+        Log.d(TAG, "Injected resume logic for vars: $checkpointStateVars")
+    }
+    
+    /**
+     * Check if a value expression represents a default initialization.
+     * These are values that should be skipped during resume since they would
+     * overwrite the restored checkpoint values.
+     */
+    private fun isDefaultInitialization(value: String): Boolean {
+        // Remove whitespace for comparison
+        val v = value.trim()
+        
+        // Check for common default values
+        return when {
+            // Numeric zero
+            v == "0" || v == "0.0" || v == "0.00" -> true
+            // Empty collections
+            v == "[]" || v == "{}" || v == "()" -> true
+            // Empty string
+            v == "\"\"" || v == "''" -> true
+            // None
+            v == "None" -> true
+            // Boolean False
+            v == "False" -> true
+            // Negative number patterns (less common but possible defaults)
+            v.matches(Regex("^-?\\d+(\\.\\d+)?$")) && v.toDoubleOrNull()?.let { it == 0.0 } == true -> true
+            // List/dict/set comprehensions or function calls are NOT defaults
+            v.contains("(") || v.contains("[") && !v.startsWith("[") -> false
+            // Otherwise not a default
+            else -> false
+        }
+    }
+    
+    /**
      * Execute function code using desktop worker approach
      * Matches the desktop worker's _execute_task method
+     * 
+     * On Android, uses code instrumentation for checkpoint capture since sys.settrace() doesn't work.
+     * 
+     * @param funcCode The Python function code to execute
+     * @param taskArgs The arguments to pass to the function
+     * @param isResume Whether this is a resume execution (will inject resume logic)
      */
-    private fun executeFunctionCode(funcCode: String, taskArgs: PyObject?): Any? {
+    private fun executeFunctionCode(funcCode: String, taskArgs: PyObject?, isResume: Boolean = false): Any? {
+        // Extract function name for trace
+        val funcName = extractFunctionName(funcCode)
+        val handler = checkpointHandlerRef.get()
+        val hasCheckpointHandler = handler != null
+        
         return try {
-            Log.d(TAG, "🔄 Executing task... | worker_runtime=android")
+            Log.d(TAG, "🔄 Executing task... | worker_runtime=android | func=$funcName | checkpoint=$hasCheckpointHandler | resume=$isResume")
+            
+            // Instrument code for checkpointing if handler is set
+            val codeToExecute = if (hasCheckpointHandler && funcName != null) {
+                val checkpointStateVars = handler?.getCheckpointStateVars() ?: emptyList()
+                configureCheckpointTrace(funcName, checkpointStateVars)
+                
+                // Instrument the code to inject checkpoint callbacks (and resume logic if resuming)
+                if (checkpointStateVars.isNotEmpty()) {
+                    val instrumented = instrumentCodeForCheckpointing(funcCode, checkpointStateVars, isResume)
+                    Log.d(TAG, "Code instrumented for checkpointing with vars: $checkpointStateVars, resume=$isResume")
+                    // Log a portion of the instrumented code to verify injection
+                    val injectionMarker = "_update_checkpoint_state"
+                    if (instrumented.contains(injectionMarker)) {
+                        Log.i(TAG, "✅ Checkpoint callback injection successful")
+                    } else {
+                        Log.w(TAG, "⚠️ No checkpoint callback was injected - state capture may not work")
+                    }
+                    if (isResume && instrumented.contains("_resume_start_index")) {
+                        Log.i(TAG, "✅ Resume logic injection successful")
+                    }
+                    instrumented
+                } else {
+                    Log.w(TAG, "⚠️ No checkpoint state vars configured - using original code")
+                    funcCode
+                }
+            } else {
+                funcCode
+            }
             
             // Deserialize the function (equivalent to deserialize_function in desktop worker)
-            val func = deserializeFunction(funcCode)
+            val func = deserializeFunction(codeToExecute)
             
             // Convert taskArgs to Java list for processing with proper error handling
             val argsList = convertPyObjectToList(taskArgs)
@@ -801,6 +1331,11 @@ def sentiment_analysis_worker(message_data):
             // Execute the function with the provided arguments (matching desktop worker logic)
             val result = executeFunctionWithArgs(func, argsList)
             
+            // Disable checkpoint capture after execution
+            if (hasCheckpointHandler) {
+                disableCheckpointTrace()
+            }
+            
             Log.d(TAG, "✅ Task completed successfully")
             
             // result is already a Java object from executeFunctionWithArgs
@@ -808,6 +1343,10 @@ def sentiment_analysis_worker(message_data):
             result
             
         } catch (e: Exception) {
+            // Disable trace on error
+            if (hasCheckpointHandler) {
+                disableCheckpointTrace()
+            }
             val errorMsg = "Task execution failed: ${e.message}"
             Log.e(TAG, "❌ Task failed: $errorMsg")
             throw Exception(errorMsg)

@@ -241,7 +241,7 @@ class WorkerWebSocketClient(private val context: Context) {
                     val data = messageData.data
                     val checkpointId = data?.optInt("checkpoint_id", -1) ?: -1
                     val taskId = data?.optString("task_id", "") ?: ""
-                    Log.d(TAG, "✅ Checkpoint #$checkpointId acknowledged for task $taskId")
+                    Log.d(TAG, "Checkpoint #$checkpointId acknowledged for task $taskId")
                 }
                 else -> {
                     Log.w(TAG, "Unknown message type: ${messageData.type}")
