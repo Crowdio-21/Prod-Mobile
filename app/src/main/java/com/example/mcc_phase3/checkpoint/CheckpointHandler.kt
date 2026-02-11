@@ -45,31 +45,44 @@ class CheckpointHandler(
     val currentState: StateFlow<CheckpointState?> = _currentState
 
     /**
-     * Data class representing checkpoint state
+     * Generic data class representing checkpoint state.
+     * Uses a Map to store all state variables dynamically based on task_metadata.checkpoint_state.
+     * No hardcoded task-specific fields - fully generic for any task type.
      */
     data class CheckpointState(
-        val trialsCompleted: Int = 0,
-        val totalCount: Long = 0,
-        val numTrials: Int = 0,
-        val progressPercent: Float = 0f,
-        val estimatedE: Double = 0.0,
+        val stateData: Map<String, Any> = emptyMap(),
         val startTime: Long = System.currentTimeMillis(),
-        val status: String = "running",
-        // Generic fields for other task types
-        val customData: Map<String, Any>? = null
+        val status: String = "running"
     ) {
+        // Convenience accessors for common fields (optional, for backwards compatibility)
+        val progressPercent: Float
+            get() = (stateData["progress_percent"] as? Number)?.toFloat() ?: 0f
+        
         fun toJson(): JSONObject {
             return JSONObject().apply {
-                put("trials_completed", trialsCompleted)
-                put("total_count", totalCount)
-                put("num_trials", numTrials)
-                put("progress_percent", progressPercent)
-                put("estimated_e", estimatedE)
+                // Add all dynamic state variables
+                stateData.forEach { (key, value) ->
+                    when (value) {
+                        is Number -> put(key, value)
+                        is Boolean -> put(key, value)
+                        is String -> put(key, value)
+                        is List<*> -> put(key, JSONArray(value))
+                        is Map<*, *> -> put(key, JSONObject(value as Map<String, Any>))
+                        else -> put(key, value.toString())
+                    }
+                }
+                // Add metadata fields
                 put("start_time", startTime)
                 put("status", status)
-                customData?.forEach { (key, value) ->
-                    put(key, value)
-                }
+            }
+        }
+        
+        companion object {
+            /**
+             * Create CheckpointState from a generic map of state variables
+             */
+            fun fromMap(data: Map<String, Any>): CheckpointState {
+                return CheckpointState(stateData = data)
             }
         }
     }
@@ -131,15 +144,27 @@ class CheckpointHandler(
         Log.d(TAG, "Starting checkpoint monitoring for task $taskId (interval: ${checkpointIntervalMs}ms)")
 
         checkpointJob = scope.launch {
-            // Initial delay to let task start
-            delay(1000L)
+            // Shorter initial delay - just enough for task to start executing
+            // The checkpoint callback should be set up by now
+            delay(500L)
 
             while (isActive) {
                 try {
+                    // Wait for interval first, then poll
+                    // This gives the task time to make progress before first checkpoint
+                    delay(checkpointIntervalMs)
+                    
                     Log.d(TAG, "Taking checkpoint for task $taskId")
                     
                     // Poll state from external source if callback provided
-                    pollState?.invoke()
+                    // This calls PythonExecutor.pollAndUpdateCheckpointState()
+                    if (pollState != null) {
+                        Log.d(TAG, "Invoking pollState callback...")
+                        val pollStartTime = System.currentTimeMillis()
+                        pollState.invoke()
+                        val pollDuration = System.currentTimeMillis() - pollStartTime
+                        Log.d(TAG, "pollState callback completed in ${pollDuration}ms")
+                    }
 
                     val state = _currentState.value
                     if (state != null) {

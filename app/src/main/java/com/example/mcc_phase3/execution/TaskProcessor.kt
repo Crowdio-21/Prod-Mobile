@@ -707,8 +707,21 @@ class TaskProcessor(private val context: Context) {
     
     /**
      * Update checkpoint state (called during task execution)
-     * This allows Python code to report progress for checkpointing
+     * This allows Python code to report progress for checkpointing.
+     * Uses a generic Map-based approach - no hardcoded variable names.
+     * 
+     * @param stateData Map of state variable names to values
      */
+    fun updateCheckpointState(stateData: Map<String, Any>) {
+        checkpointHandler.updateState(
+            CheckpointHandler.CheckpointState.fromMap(stateData)
+        )
+    }
+    
+    /**
+     * Legacy overload for backwards compatibility - converts to generic Map
+     */
+    @Deprecated("Use updateCheckpointState(Map) instead for generic state handling")
     fun updateCheckpointState(
         trialsCompleted: Int,
         totalCount: Long,
@@ -717,15 +730,16 @@ class TaskProcessor(private val context: Context) {
         estimatedE: Double = 0.0,
         customData: Map<String, Any>? = null
     ) {
+        val stateData = mutableMapOf<String, Any>(
+            "trials_completed" to trialsCompleted,
+            "total_count" to totalCount,
+            "num_trials" to numTrials,
+            "progress_percent" to progressPercent,
+            "estimated_e" to estimatedE
+        )
+        customData?.let { stateData.putAll(it) }
         checkpointHandler.updateState(
-            CheckpointHandler.CheckpointState(
-                trialsCompleted = trialsCompleted,
-                totalCount = totalCount,
-                numTrials = numTrials,
-                progressPercent = progressPercent,
-                estimatedE = estimatedE,
-                customData = customData
-            )
+            CheckpointHandler.CheckpointState.fromMap(stateData)
         )
     }
     
