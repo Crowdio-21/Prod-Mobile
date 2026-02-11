@@ -63,6 +63,7 @@ android {
                 install("numpy")
                 install("requests")
                 install("aiohttp")
+                install("Pillow")
             }
         }
     }
