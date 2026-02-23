@@ -6,6 +6,7 @@ import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.execution.TaskProcessor
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.utils.EventLogger
+import com.example.mcc_phase3.utils.NotificationHelper
 import kotlinx.coroutines.*
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
@@ -78,6 +79,7 @@ class WorkerWebSocketClient(
                     override fun onOpen(handshake: ServerHandshake?) {
                         Log.d(TAG, "WebSocket connected to $url")
                         EventLogger.success(EventLogger.Categories.WEBSOCKET, "Connected to foreman: $url")
+                        NotificationHelper.notifyWorkerConnected(context)
                         isConnected.set(true)
                         reconnectAttempts.set(0)
                         
@@ -103,6 +105,7 @@ class WorkerWebSocketClient(
                     override fun onClose(code: Int, reason: String?, remote: Boolean) {
                         Log.w(TAG, "WebSocket closed (code=$code, reason=$reason, remote=$remote)")
                         EventLogger.warning(EventLogger.Categories.WEBSOCKET, "Disconnected (code=$code, reason=$reason)")
+                        NotificationHelper.notifyWorkerDisconnected(context, reason)
                         isConnected.set(false)
                         stopHeartbeat()
                         

@@ -5,10 +5,12 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.example.mcc_phase3.MobileWorkerActivity
 import com.example.mcc_phase3.R
+import com.example.mcc_phase3.utils.NotificationStore
 
 /**
  * Singleton helper for posting event-triggered notifications.
@@ -53,25 +55,38 @@ object NotificationHelper {
     fun notifyTaskAssigned(context: Context, taskId: String, jobId: String?) {
         val shortId = taskId.takeLast(8)
         val jobPart = if (jobId != null) " (Job: ${jobId.takeLast(8)})" else ""
-        post(context, NOTIFY_TASK_ASSIGNED, "Task Assigned", "Task …$shortId received$jobPart")
+        val title = "Task Assigned"
+        val msg = "Task \u2026$shortId received$jobPart"
+        NotificationStore.add(NotificationStore.Type.TASK_ASSIGNED, title, msg)
+        post(context, NOTIFY_TASK_ASSIGNED, title, msg)
     }
 
     fun notifyTaskCompleted(context: Context, taskId: String) {
-        post(context, NOTIFY_TASK_COMPLETED, "Task Completed", "Task …${taskId.takeLast(8)} finished successfully")
+        val title = "Task Completed"
+        val msg = "Task \u2026${taskId.takeLast(8)} finished successfully"
+        NotificationStore.add(NotificationStore.Type.TASK_COMPLETED, title, msg)
+        post(context, NOTIFY_TASK_COMPLETED, title, msg)
     }
 
     fun notifyTaskFailed(context: Context, taskId: String, reason: String?) {
-        val msg = reason?.take(80) ?: "Unknown error"
-        post(context, NOTIFY_TASK_FAILED, "Task Failed", "Task …${taskId.takeLast(8)}: $msg")
+        val title = "Task Failed"
+        val msg = (reason?.take(80) ?: "Unknown error").let { "Task \u2026${taskId.takeLast(8)}: $it" }
+        NotificationStore.add(NotificationStore.Type.TASK_FAILED, title, msg)
+        post(context, NOTIFY_TASK_FAILED, title, msg)
     }
 
     fun notifyWorkerConnected(context: Context) {
-        post(context, NOTIFY_CONNECTED, "Worker Connected", "Successfully connected to foreman")
+        val title = "Worker Connected"
+        val msg = "Successfully connected to foreman"
+        NotificationStore.add(NotificationStore.Type.CONNECTED, title, msg)
+        post(context, NOTIFY_CONNECTED, title, msg)
     }
 
     fun notifyWorkerDisconnected(context: Context, reason: String? = null) {
+        val title = "Worker Disconnected"
         val msg = if (!reason.isNullOrBlank()) "Disconnected: ${reason.take(60)}" else "Connection to foreman lost"
-        post(context, NOTIFY_DISCONNECTED, "Worker Disconnected", msg)
+        NotificationStore.add(NotificationStore.Type.DISCONNECTED, title, msg)
+        post(context, NOTIFY_DISCONNECTED, title, msg)
     }
 
     // ── Internal helpers ────────────────────────────────────────────────────
@@ -88,8 +103,11 @@ object NotificationHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val appIcon = BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher)
+
         val notification = NotificationCompat.Builder(context, CHANNEL_ID_EVENTS)
             .setSmallIcon(R.drawable.ic_worker)
+            .setLargeIcon(appIcon)
             .setContentTitle(title)
             .setContentText(content)
             .setStyle(NotificationCompat.BigTextStyle().bigText(content))
