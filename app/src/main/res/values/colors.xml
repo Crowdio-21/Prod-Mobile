@@ -4,7 +4,7 @@
     <color name="primary">#0A3D7A</color>
     <color name="primary_dark">#072E5C</color>
     <color name="primary_darker">#051F3E</color>
-    <color name="title_bar_blue">#0A3D7A</color>
+    <color name="title_bar_blue">#002E52</color>
     <color name="primary_light">#C5D9F0</color>
     <color name="accent">#FF5722</color>
     <color name="surface_primary">#FFFFFF</color>
@@ -16,6 +16,7 @@
     <color name="warning">#FF9800</color>
     <color name="error">#F44336</color>
     <color name="info">#2196F3</color>
+    <color name="pause_worker">#9D585C</color>
 
     <!-- Dark Theme Colors -->
     <color name="primary_dark_theme">#5B92CF</color>

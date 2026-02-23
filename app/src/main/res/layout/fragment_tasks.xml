@@ -111,8 +111,8 @@
                             app:iconGravity="textStart"
                             app:cornerRadius="12dp"
                             style="@style/Widget.Material3.Button.OutlinedButton"
-                            app:strokeColor="@color/warning"
-                            android:textColor="@color/warning" />
+                            app:strokeColor="@color/pause_worker"
+                            android:textColor="@color/pause_worker" />
 
                     </LinearLayout>
 

@@ -3,59 +3,102 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="@color/background_light">
+    android:orientation="vertical">
 
-    <com.google.android.material.card.MaterialCardView
+    <!-- Header bar -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_margin="16dp"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="2dp"
-        app:cardBackgroundColor="@color/surface_secondary">
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="8dp">
 
-        <LinearLayout
-            android:layout_width="match_parent"
+        <TextView
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="16dp">
+            android:layout_weight="1"
+            android:text="Notifications"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="@color/text_primary" />
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Notifications"
-                android:textSize="18sp"
-                android:textStyle="bold"
-                android:textColor="@color/text_primary" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_mark_read"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Mark read"
+            android:textSize="12sp" />
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Stay updated with task and system notifications"
-                android:textSize="14sp"
-                android:textColor="@color/text_secondary" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_clear_all"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Clear all"
+            android:textSize="12sp"
+            android:textColor="@color/error" />
 
-        </LinearLayout>
+    </LinearLayout>
 
-    </com.google.android.material.card.MaterialCardView>
+    <!-- Unread count chip -->
+    <com.google.android.material.chip.Chip
+        android:id="@+id/unread_chip"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="8dp"
+        android:text="0 unread"
+        android:textSize="12sp"
+        app:chipBackgroundColor="@color/primary"
+        android:textColor="@color/white"
+        android:visibility="gone" />
 
+    <!-- Notification list -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/notifications_recycler_view"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:padding="8dp"
-        android:clipToPadding="false" />
+        android:clipToPadding="false"
+        android:paddingBottom="8dp" />
 
-    <TextView
-        android:id="@+id/empty_notifications_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:text="No notifications yet"
-        android:textSize="16sp"
-        android:textColor="@color/text_secondary"
-        android:visibility="gone" />
+    <!-- Empty state -->
+    <LinearLayout
+        android:id="@+id/empty_state"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:visibility="gone">
+
+        <ImageView
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:src="@drawable/ic_notifications"
+            app:tint="@color/text_secondary"
+            android:alpha="0.4" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="No notifications yet"
+            android:textSize="16sp"
+            android:textColor="@color/text_secondary" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Task events will appear here"
+            android:textSize="13sp"
+            android:textColor="@color/text_secondary"
+            android:alpha="0.7" />
+
+    </LinearLayout>
 
 </LinearLayout>

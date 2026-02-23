@@ -12,7 +12,7 @@
     <color name="primary_dark">#4A7AB5</color>
     <color name="primary_darker">#3A6A9E</color>
     <color name="primary_light">#0A3D7A</color>
-    <color name="title_bar_blue">#0D2B4E</color>
+    <color name="title_bar_blue">#001F3A</color>
     <color name="accent">#FF8A65</color>
 
     <!-- Text -->
@@ -24,6 +24,7 @@
     <color name="warning">#FFB74D</color>
     <color name="error">#E57373</color>
     <color name="info">#64B5F6</color>
+    <color name="pause_worker">#C47B7E</color>
 
     <!-- Additional named colors used in layouts -->
     <color name="primary_color">#5B92CF</color>
