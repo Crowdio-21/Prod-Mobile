@@ -1,9 +1,13 @@
 package com.example.mcc_phase3.ui.fragments
 
 import android.app.AlertDialog
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.IBinder
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -13,6 +17,9 @@ import androidx.fragment.app.Fragment
 import com.example.mcc_phase3.R
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.services.MobileWorkerService
+import com.example.mcc_phase3.utils.ThemeManager
+import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textview.MaterialTextView
@@ -26,9 +33,37 @@ class SettingsFragment : Fragment() {
     private lateinit var workerNameCard: MaterialCardView
     private lateinit var workerNameText: MaterialTextView
     private lateinit var notificationsSwitch: SwitchMaterial
-    private lateinit var darkModeSwitch: SwitchMaterial
+    private lateinit var themeToggleGroup: MaterialButtonToggleGroup
     private lateinit var workerIdManager: WorkerIdManager
+
+    // Service binding so we can reconnect the worker when the address changes
+    private var workerService: MobileWorkerService? = null
+    private var isBound = false
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            workerService = (binder as MobileWorkerService.LocalBinder).getService()
+            isBound = true
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            workerService = null
+            isBound = false
+        }
+    }
     
+    override fun onStart() {
+        super.onStart()
+        val intent = Intent(requireContext(), MobileWorkerService::class.java)
+        requireContext().bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isBound) {
+            requireContext().unbindService(serviceConnection)
+            isBound = false
+        }
+    }
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -49,7 +84,7 @@ class SettingsFragment : Fragment() {
         workerNameCard = view.findViewById(R.id.worker_name_card)
         workerNameText = view.findViewById(R.id.worker_name_text)
         notificationsSwitch = view.findViewById(R.id.notifications_switch)
-        darkModeSwitch = view.findViewById(R.id.dark_mode_switch)
+        themeToggleGroup = view.findViewById(R.id.theme_toggle_group)
         
         loadSettings()
         setupListeners()
@@ -76,7 +111,14 @@ class SettingsFragment : Fragment() {
         }
         
         notificationsSwitch.isChecked = sharedPreferences.getBoolean("notifications_enabled", true)
-        darkModeSwitch.isChecked = sharedPreferences.getBoolean("dark_mode", false)
+
+        // Reflect current ThemeManager mode in the toggle group
+        val checkedId = when (ThemeManager.getCurrentThemeMode()) {
+            ThemeManager.ThemeMode.LIGHT  -> R.id.theme_light
+            ThemeManager.ThemeMode.DARK   -> R.id.theme_dark
+            ThemeManager.ThemeMode.SYSTEM -> R.id.theme_system
+        }
+        themeToggleGroup.check(checkedId)
     }
     
     private fun setupListeners() {
@@ -91,10 +133,15 @@ class SettingsFragment : Fragment() {
         notificationsSwitch.setOnCheckedChangeListener { _, isChecked ->
             sharedPreferences.edit().putBoolean("notifications_enabled", isChecked).apply()
         }
-        
-        darkModeSwitch.setOnCheckedChangeListener { _, isChecked ->
-            sharedPreferences.edit().putBoolean("dark_mode", isChecked).apply()
-            Toast.makeText(requireContext(), "Please restart the app to apply theme", Toast.LENGTH_SHORT).show()
+
+        themeToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val mode = when (checkedId) {
+                R.id.theme_light  -> ThemeManager.ThemeMode.LIGHT
+                R.id.theme_dark   -> ThemeManager.ThemeMode.DARK
+                else              -> ThemeManager.ThemeMode.SYSTEM
+            }
+            ThemeManager.setThemeMode(mode)
         }
     }
     
@@ -118,12 +165,29 @@ class SettingsFragment : Fragment() {
                 val portStr = portInput.text.toString().trim()
                 
                 if (validateInput(ip, portStr)) {
+                    val wasRunning = workerService?.isWorkerRunning() == true
+
                     // Save to ConfigManager (used by worker service)
                     configManager.setForemanIP(ip)
                     configManager.setWebSocketPort(portStr.toInt())
-                    
+
                     loadSettings()
-                    Toast.makeText(requireContext(), "Configuration saved. Restart worker to apply.", Toast.LENGTH_LONG).show()
+
+                    if (wasRunning) {
+                        // Stop current connection and reconnect to new address
+                        workerService?.stopWorker()
+                        val newUrl = configManager.getForemanURL()
+                        if (newUrl != null) {
+                            val serviceIntent = Intent(requireContext(), MobileWorkerService::class.java).apply {
+                                action = "START_WORKER"
+                                putExtra("foreman_url", newUrl)
+                            }
+                            requireContext().startService(serviceIntent)
+                            Toast.makeText(requireContext(), "Reconnecting to $ip:${portStr}...", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        Toast.makeText(requireContext(), "Configuration saved.", Toast.LENGTH_SHORT).show()
+                    }
                 } else {
                     Toast.makeText(requireContext(), "Invalid configuration", Toast.LENGTH_SHORT).show()
                 }

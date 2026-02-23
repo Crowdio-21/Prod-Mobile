@@ -21,6 +21,7 @@ import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.execution.PythonExecutor
 import com.example.mcc_phase3.execution.TaskProcessor
 import com.example.mcc_phase3.utils.EventLogger
+import com.example.mcc_phase3.utils.NotificationHelper
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -61,8 +62,9 @@ class MobileWorkerService : Service() {
         EventLogger.info(EventLogger.Categories.SERVICE, "Mobile Worker Service created")
         workerIdManager = WorkerIdManager.getInstance(this)
         
-        // Create notification channel first
+        // Create notification channels
         createNotificationChannel()
+        NotificationHelper.createEventChannel(this)
         
         // Start as foreground service immediately to prevent being killed
         if (hasNotificationPermission()) {
