@@ -16,6 +16,7 @@ class WorkerIdManager private constructor(context: Context) {
         private const val TAG = "WorkerIdManager"
         private const val PREFS_NAME = "WorkerIdStorage"
         private const val KEY_WORKER_ID = "worker_id"
+        private const val KEY_CUSTOM_WORKER_NAME = "custom_worker_name"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_WORKER_ID_GENERATED_AT = "worker_id_generated_at"
         
@@ -35,12 +36,20 @@ class WorkerIdManager private constructor(context: Context) {
     /**
      * Get or generate a unique worker ID for this device
      * The worker ID is persistent across app restarts and device reboots
+     * Checks for custom worker name first, then existing ID, then generates new
      */
     fun getOrGenerateWorkerId(): String {
+        // Check for custom worker name first
+        val customName = prefs.getString(KEY_CUSTOM_WORKER_NAME, null)
+        if (customName != null && customName.isNotBlank()) {
+            Log.d(TAG, "Using custom worker name: $customName")
+            return customName
+        }
+        
         val existingWorkerId = prefs.getString(KEY_WORKER_ID, null)
         
         return if (existingWorkerId != null) {
-            Log.d(TAG, "✅ Retrieved existing worker ID: $existingWorkerId")
+            Log.d(TAG, "Retrieved existing worker ID: $existingWorkerId")
             existingWorkerId
         } else {
             val newWorkerId = generateUniqueWorkerId()
@@ -51,24 +60,34 @@ class WorkerIdManager private constructor(context: Context) {
     }
     
     /**
-     * Generate a unique worker ID based on device characteristics
-     * Uses Android ID as the primary identifier with additional entropy
+     * Generate a simple, readable worker ID
+     * Format: android_<device_model>_<short_id>
+     * Example: android_pixel7_a3f2c9
      */
     private fun generateUniqueWorkerId(): String {
-        val deviceId = getDeviceId()
-        val timestamp = System.currentTimeMillis()
-        val randomSuffix = UUID.randomUUID().toString().substring(0, 8)
+        val deviceModel = getDeviceModel()
+        val shortId = UUID.randomUUID().toString().substring(0, 6)
         
-        // Create a unique worker ID combining device ID, timestamp, and random suffix
-        val workerId = "android_worker_${deviceId}_${timestamp}_${randomSuffix}"
+        // Create a simple, readable worker ID
+        val workerId = "android_${deviceModel}_${shortId}"
         
-        Log.d(TAG, "🔧 Generated worker ID components:")
-        Log.d(TAG, "   Device ID: $deviceId")
-        Log.d(TAG, "   Timestamp: $timestamp")
-        Log.d(TAG, "   Random suffix: $randomSuffix")
-        Log.d(TAG, "   Final worker ID: $workerId")
+        Log.d(TAG, "🔧 Generated simple worker ID: $workerId")
         
         return workerId
+    }
+    
+    /**
+     * Get a simplified device model name
+     * Removes spaces and special characters, converts to lowercase
+     */
+    private fun getDeviceModel(): String {
+        val model = android.os.Build.MODEL
+            .replace(" ", "")
+            .replace("-", "")
+            .lowercase()
+            .take(12) // Limit to 12 chars
+        
+        return if (model.isBlank()) "device" else model
     }
     
     /**
@@ -91,7 +110,7 @@ class WorkerIdManager private constructor(context: Context) {
                 getOrGenerateDeviceId()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "⚠️ Could not retrieve Android ID, using fallback", e)
+            Log.w(TAG, "Could not retrieve Android ID, using fallback", e)
             getOrGenerateDeviceId()
         }
     }
@@ -145,7 +164,7 @@ class WorkerIdManager private constructor(context: Context) {
      * Useful for testing or if the worker ID needs to be regenerated
      */
     fun resetWorkerId(): String {
-        Log.d(TAG, "🔄 Resetting worker ID")
+        Log.d(TAG, "Resetting worker ID")
         val newWorkerId = generateUniqueWorkerId()
         saveWorkerId(newWorkerId)
         return newWorkerId
@@ -159,15 +178,46 @@ class WorkerIdManager private constructor(context: Context) {
     }
     
     /**
+     * Set a custom worker name
+     * This will override the auto-generated worker ID
+     */
+    fun setCustomWorkerName(customName: String) {
+        if (customName.isBlank()) {
+            Log.w(TAG, "Cannot set empty custom worker name")
+            return
+        }
+        
+        prefs.edit().putString(KEY_CUSTOM_WORKER_NAME, customName).apply()
+        Log.d(TAG, "Custom worker name set: $customName")
+    }
+    
+    /**
+     * Get the custom worker name if set
+     */
+    fun getCustomWorkerName(): String? {
+        return prefs.getString(KEY_CUSTOM_WORKER_NAME, null)
+    }
+    
+    /**
+     * Clear the custom worker name (will use auto-generated ID)
+     */
+    fun clearCustomWorkerName() {
+        prefs.edit().remove(KEY_CUSTOM_WORKER_NAME).apply()
+        Log.d(TAG, "🗑️ Custom worker name cleared")
+    }
+    
+    /**
      * Get worker ID information for debugging
      */
     fun getWorkerIdInfo(): WorkerIdInfo {
         val workerId = getCurrentWorkerId()
         val generatedAt = getWorkerIdGeneratedAt()
         val deviceId = getDeviceId()
+        val customName = getCustomWorkerName()
         
         return WorkerIdInfo(
             workerId = workerId,
+            customName = customName,
             deviceId = deviceId,
             generatedAt = generatedAt,
             hasWorkerId = hasWorkerId()
@@ -180,6 +230,7 @@ class WorkerIdManager private constructor(context: Context) {
  */
 data class WorkerIdInfo(
     val workerId: String?,
+    val customName: String?,
     val deviceId: String,
     val generatedAt: Long,
     val hasWorkerId: Boolean
