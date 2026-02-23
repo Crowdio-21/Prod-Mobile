@@ -8,6 +8,7 @@ import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.checkpoint.TaskMetadata
 import com.example.mcc_phase3.utils.EventLogger
+import com.example.mcc_phase3.utils.NotificationHelper
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -179,6 +180,7 @@ class TaskProcessor(private val context: Context) {
             currentProgress.set(0f)
             Log.d(TAG, "Task $taskId started at ${taskStartTime.get()}")
             EventLogger.info(EventLogger.Categories.TASK, "Task $taskId started (Job: $jobId)")
+            NotificationHelper.notifyTaskAssigned(context, taskId, jobId)
             
             var progressPollingJob: Job? = null
             
@@ -241,6 +243,7 @@ class TaskProcessor(private val context: Context) {
                 
                 Log.d(TAG, " Task $taskId completed successfully")
                 EventLogger.success(EventLogger.Categories.TASK, "Task $taskId completed successfully")
+                NotificationHelper.notifyTaskCompleted(context, taskId)
                 response
                 
             } finally {
@@ -264,6 +267,7 @@ class TaskProcessor(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Error processing task assignment", e)
             EventLogger.error(EventLogger.Categories.TASK, "Task $taskId failed: ${e.message}")
+            NotificationHelper.notifyTaskFailed(context, taskId, e.message)
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)

@@ -39,7 +39,7 @@
                     android:layout_marginTop="8dp"
                     android:text="CrowdIO Mobile Worker for Android"
                     android:textSize="14sp"
-                    android:textColor="@android:color/darker_gray" />
+                    android:textColor="?android:attr/textColorSecondary" />
 
             </LinearLayout>
 
@@ -274,11 +274,11 @@
                     android:layout_height="wrap_content"
                     android:maxHeight="200dp"
                     android:scrollbars="vertical"
-                    android:text="📝 Logs: No logs available"
+                    android:text="Logs: No logs available"
                     android:textSize="12sp"
                     android:lineSpacingExtra="2dp"
-                    android:background="@android:color/black"
-                    android:textColor="@android:color/white"
+                    android:background="@color/surface_primary_dark"
+                    android:textColor="@color/white"
                     android:padding="12dp"
                     android:fontFamily="monospace" />
 
