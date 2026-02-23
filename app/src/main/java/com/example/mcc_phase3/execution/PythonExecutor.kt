@@ -7,6 +7,7 @@ import com.chaquo.python.PyObject
 import com.chaquo.python.android.AndroidPlatform
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
+import com.example.mcc_phase3.utils.EventLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,6 +34,9 @@ class PythonExecutor(private val context: Context) {
     // Checkpoint handler reference for progress updates during execution
     private val checkpointHandlerRef = AtomicReference<CheckpointHandler?>(null)
     
+    // Progress callback for real-time progress updates (independent of checkpointing)
+    private var progressCallback: ((Float) -> Unit)? = null
+    
     // Python modules
     private var pythonInstance: Python? = null
     private var builtinsModule: PyObject? = null
@@ -45,6 +49,15 @@ class PythonExecutor(private val context: Context) {
     fun setCheckpointHandler(handler: CheckpointHandler?) {
         checkpointHandlerRef.set(handler)
         Log.d(TAG, "Checkpoint handler ${if (handler != null) "set" else "cleared"}")
+    }
+    
+    /**
+     * Set the progress callback for real-time progress updates
+     * Python code can call builtins._progress_callback(50.0) to report 50% progress
+     */
+    fun setProgressCallback(callback: ((Float) -> Unit)?) {
+        progressCallback = callback
+        Log.d(TAG, "Progress callback ${if (callback != null) "set" else "cleared"}")
     }
     
     /**
@@ -144,11 +157,11 @@ print("[Android Worker] Checkpoint capture disabled")
                 base64Module = pythonInstance?.getModule("base64")
                 
                 isInitialized.set(true)
-                Log.d(TAG, "✅ Python environment initialized successfully")
+                Log.d(TAG, "Python environment initialized successfully")
                 true
                 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to initialize Python environment", e)
+                Log.e(TAG, "Failed to initialize Python environment", e)
                 false
             }
         }
@@ -211,14 +224,20 @@ print("[Android Worker] Checkpoint capture disabled")
                 
                 // Set up checkpoint callback in Python builtins if handler is available
                 setupCheckpointCallback()
+                
+                // Set up progress callback for real-time progress reporting
+                setupProgressCallback()
 
                 // Execute the Python code using the desktop worker approach
                 val result = executeFunctionCode(pythonCode, args)
                 
                 // Clean up checkpoint callback
                 cleanupCheckpointCallback()
+                
+                // Clean up progress callback
+                cleanupProgressCallback()
 
-                Log.d(TAG, "✅ Python code executed successfully")
+                Log.d(TAG, "Python code executed successfully")
                 mapOf<String, Any?>(
                     "status" to "success",
                     "message" to "Code executed successfully",
@@ -227,7 +246,8 @@ print("[Android Worker] Checkpoint capture disabled")
                 )
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to execute Python code", e)
+                Log.e(TAG, "Failed to execute Python code", e)
+                EventLogger.error(EventLogger.Categories.PYTHON, "Python execution failed: ${e.message}")
                 mapOf<String, Any?>(
                     "status" to "error",
                     "message" to "Execution failed: ${e.message ?: "Unknown error"}",
@@ -418,7 +438,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 
                 val result = executePythonCode(testCode, null, createExecutionContext("test_worker"))
                 
-                Log.d(TAG, "✅ Python execution test successful")
+                Log.d(TAG, "Python execution test successful")
                 mapOf<String, Any?>(
                     "status" to "success",
                     "message" to "Python execution test passed",
@@ -426,7 +446,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 )
                 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Python execution test failed", e)
+                Log.e(TAG, "Python execution test failed", e)
                 mapOf<String, Any?>(
                     "status" to "error",
                     "message" to "Python execution test failed: ${e.message ?: "Unknown error"}",
@@ -544,6 +564,95 @@ print("[Android Worker] Checkpoint callback cleaned up")
             
         } catch (e: Exception) {
             Log.w(TAG, "Failed to clean up checkpoint callback: ${e.message}")
+        }
+    }
+    
+    /**
+     * Set up real-time progress callback in Python builtins
+     * Python code can call: builtins._progress_callback(50.0) to report 50% progress
+     * Works independently of checkpointing
+     */
+    private fun setupProgressCallback() {
+        if (progressCallback != null) {
+            try {
+                val setupCode = """
+import builtins
+
+def _progress_callback(progress_percent):
+    '''
+    Report task progress in real-time (independent of checkpointing).
+    
+    Usage: builtins._progress_callback(50.0)  # Report 50% progress
+    
+    This works even when checkpointing is disabled.
+    '''
+    # Store it so Kotlin can read it
+    builtins._current_progress = float(progress_percent)
+
+builtins._progress_callback = _progress_callback
+builtins._current_progress = 0.0
+
+print("[Android Worker] Progress callback initialized (real-time progress reporting)")
+""".trimIndent()
+                
+                val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+                builtinsModule?.callAttr("exec", setupCode, globalDict)
+                
+                Log.d(TAG, "Progress callback set up in Python builtins")
+                
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set up progress callback: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Clean up progress callback from Python builtins
+     */
+    private fun cleanupProgressCallback() {
+        try {
+            val cleanupCode = """
+import builtins
+
+# Clean up progress callback attributes
+for attr in ['_progress_callback', '_current_progress']:
+    if hasattr(builtins, attr):
+        delattr(builtins, attr)
+
+print("[Android Worker] Progress callback cleaned up")
+""".trimIndent()
+            
+            val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            builtinsModule?.callAttr("exec", cleanupCode, globalDict)
+            Log.d(TAG, "Progress callback cleaned up")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to clean up progress callback: ${e.message}")
+        }
+    }
+    
+    /**
+     * Poll real-time progress from Python  
+     * Reads builtins._current_progress and calls the progress callback
+     */
+    fun pollProgressAndUpdate() {
+        if (progressCallback == null) return
+        
+        try {
+            val progressValue = builtinsModule?.callAttr("getattr",
+                pythonInstance?.getModule("builtins"),
+                "_current_progress",
+                0.0f
+            )
+            
+            if (progressValue != null) {
+                val progress = progressValue.toFloat()
+                if (progress > 0f) {
+                    progressCallback?.invoke(progress)
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not poll progress: ${e.message}")
         }
     }
     
@@ -744,7 +853,7 @@ print("[Android Worker] Checkpoint callback cleaned up")
             // Load the sentiment_worker module from Python sources
             val sentimentModule = pythonInstance?.getModule("sentiment_worker")
             if (sentimentModule != null) {
-                Log.d(TAG, "✅ Loaded sentiment_worker module from Python sources")
+                Log.d(TAG, "Loaded sentiment_worker module from Python sources")
                 // Read the module source code
                 val inspect = pythonInstance?.getModule("inspect")
                 val source = inspect?.callAttr("getsource", sentimentModule)?.toString()
@@ -1464,7 +1573,7 @@ def sentiment_analysis_worker(message_data):
         val hasCheckpointHandler = handler != null
         
         return try {
-            Log.d(TAG, "🔄 Executing task... | worker_runtime=android | func=$funcName | checkpoint=$hasCheckpointHandler | resume=$isResume")
+            Log.d(TAG, "Executing task... | worker_runtime=android | func=$funcName | checkpoint=$hasCheckpointHandler | resume=$isResume")
             
             // Instrument code for checkpointing if handler is set
             val codeToExecute = if (hasCheckpointHandler && funcName != null) {
@@ -1515,7 +1624,7 @@ def sentiment_analysis_worker(message_data):
                 disableCheckpointTrace()
             }
             
-            Log.d(TAG, "✅ Task completed successfully")
+            Log.d(TAG, "Task completed successfully")
             
             // result is already a Java object from executeFunctionWithArgs
             Log.d(TAG, "Function result: $result")
@@ -1527,7 +1636,7 @@ def sentiment_analysis_worker(message_data):
                 disableCheckpointTrace()
             }
             val errorMsg = "Task execution failed: ${e.message}"
-            Log.e(TAG, "❌ Task failed: $errorMsg")
+            Log.e(TAG, "Task failed: $errorMsg")
             throw Exception(errorMsg)
         }
     }
@@ -1846,7 +1955,7 @@ def sentiment_analysis_worker(message_data):
             builtinsModule = null
             jsonModule = null
             base64Module = null
-            Log.d(TAG, "✅ Python executor cleaned up")
+            Log.d(TAG, "Python executor cleaned up")
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }

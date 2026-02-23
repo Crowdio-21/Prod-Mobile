@@ -7,6 +7,7 @@ import com.example.mcc_phase3.communication.MessageProtocol
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.checkpoint.TaskMetadata
+import com.example.mcc_phase3.utils.EventLogger
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -54,6 +55,11 @@ class TaskProcessor(private val context: Context) {
     private val currentTaskId = AtomicReference<String?>(null)
     private val currentJobId = AtomicReference<String?>(null)
     private val isTaskRunning = AtomicBoolean(false)
+    private val taskStartTime = AtomicReference<Long?>(null)
+    
+    // Real-time progress tracking (independent of checkpointing)
+    private val currentProgress = AtomicReference<Float>(0f)
+    private val lastProgressUpdate = AtomicReference<Long>(0L)
     
     /**
      * Initialize the task processor
@@ -169,8 +175,32 @@ class TaskProcessor(private val context: Context) {
             currentTaskId.set(taskId)
             currentJobId.set(jobId)
             isTaskRunning.set(true)
+            taskStartTime.set(System.currentTimeMillis())
+            currentProgress.set(0f)
+            Log.d(TAG, "Task $taskId started at ${taskStartTime.get()}")
+            EventLogger.info(EventLogger.Categories.TASK, "Task $taskId started (Job: $jobId)")
+            
+            var progressPollingJob: Job? = null
             
             try {
+                // Set up real-time progress callback (works with or without checkpointing)
+                pythonExecutor.setProgressCallback { progress ->
+                    updateProgress(progress)
+                }
+                
+                // Start progress polling in background (independent of checkpointing)
+                progressPollingJob = processorScope.launch {
+                    while (isTaskRunning.get()) {
+                        try {
+                            pythonExecutor.pollProgressAndUpdate()
+                            delay(1000) // Poll every second
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Progress polling interrupted: ${e.message}")
+                            break
+                        }
+                    }
+                }
+                
                 // Start checkpoint monitoring if callback is set and checkpointing is enabled
                 checkpointCallback?.let { callback ->
                     // Configure checkpoint handler from task_metadata if present
@@ -191,7 +221,8 @@ class TaskProcessor(private val context: Context) {
                             sendCheckpoint = callback,
                             pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
                         )
-                        Log.i(TAG, "✅ Checkpoint monitoring started for task $taskId")
+                        Log.i(TAG, "Checkpoint monitoring started for task $taskId")
+                        EventLogger.info(EventLogger.Categories.CHECKPOINT, "Checkpoint monitoring started for task $taskId")
                     } else {
                         Log.d(TAG, "Checkpointing disabled for task $taskId (per task_metadata)")
                     }
@@ -209,25 +240,35 @@ class TaskProcessor(private val context: Context) {
                 )
                 
                 Log.d(TAG, " Task $taskId completed successfully")
+                EventLogger.success(EventLogger.Categories.TASK, "Task $taskId completed successfully")
                 response
                 
             } finally {
+                // Stop progress polling
+                progressPollingJob?.cancel()
+                
                 // Stop checkpoint monitoring
                 checkpointHandler.stopCheckpointMonitoring()
                 pythonExecutor.setCheckpointHandler(null)
+                pythonExecutor.setProgressCallback(null)
                 Log.i(TAG, " Checkpoint monitoring stopped for task $taskId (sent ${checkpointHandler.getCheckpointCount()} checkpoints)")
                 
                 // Clear current task and job
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
+                taskStartTime.set(null)
+                currentProgress.set(0f)
             }
             
         } catch (e: Exception) {
             Log.e(TAG, "Error processing task assignment", e)
+            EventLogger.error(EventLogger.Categories.TASK, "Task $taskId failed: ${e.message}")
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
+            taskStartTime.set(null)
+            currentProgress.set(0f)
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -275,7 +316,7 @@ class TaskProcessor(private val context: Context) {
                 return createErrorResponse("Worker is busy with task ${currentTaskId.get()}")
             }
             
-            Log.d(TAG, "🔄 Processing task resumption: $taskId")
+            Log.d(TAG, "Processing task resumption: $taskId")
             
             // Extract resumption data
             val funcCode = data.optString("func_code", "")
@@ -396,7 +437,7 @@ class TaskProcessor(private val context: Context) {
                             sendCheckpoint = callback,
                             pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
                         )
-                        Log.i(TAG, "✅ Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
+                        Log.i(TAG, "Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
                     } else {
                         Log.d(TAG, "Checkpointing disabled for resumed task $taskId (per task_metadata)")
                     }
@@ -420,7 +461,7 @@ class TaskProcessor(private val context: Context) {
                     recoveryStatus = recoveryStatus
                 )
                 
-                Log.d(TAG, "✅ Resumed task $taskId completed successfully")
+                Log.d(TAG, "Resumed task $taskId completed successfully")
                 response
                 
             } finally {
@@ -674,13 +715,64 @@ class TaskProcessor(private val context: Context) {
      * Get current task status
      */
     fun getCurrentTaskStatus(): Map<String, Any> {
+        // Capture all atomic values at once to avoid race conditions
+        val isBusy = isTaskRunning.get()
+        val taskId = currentTaskId.get() ?: ""
+        val jobId = currentJobId.get() ?: ""
+        val startTime = taskStartTime.get()
+        
+        // Get progress from multiple sources (priority order)
+        var progressPercent = currentProgress.get()  // 1. Real-time progress from Python callback
+        
+        // 2. Fallback to checkpoint progress if no real-time updates
+        if (progressPercent <= 0f) {
+            val currentCheckpointState = checkpointHandler.currentState.value
+            progressPercent = currentCheckpointState?.progressPercent ?: 0f
+        }
+        
+        // 3. Fallback to time-based progress if no other source
+        if (progressPercent <= 0f && isBusy && startTime != null) {
+            val elapsedMs = System.currentTimeMillis() - startTime
+            // Simulate progress: 0-99% over 60 seconds
+            progressPercent = ((elapsedMs / 60000f) * 99f).coerceIn(0f, 99f)
+            Log.d(TAG, "Using time-based fallback progress: $progressPercent% (elapsed: ${elapsedMs}ms)")
+        }
+        
+        Log.d(TAG, "getCurrentTaskStatus - busy: $isBusy, taskId: $taskId, progress: $progressPercent%")
+        
         return mapOf<String, Any>(
-            "is_busy" to isTaskRunning.get(),
-            "current_task_id" to (currentTaskId.get() ?: ""),  // Use empty string instead of null
-            "current_job_id" to (currentJobId.get() ?: ""),    // Include current job ID
+            "is_busy" to isBusy,
+            "current_task_id" to taskId,
+            "current_job_id" to jobId,
             "python_ready" to pythonExecutor.isReady(),
-            "processor_initialized" to isInitialized.get()
+            "processor_initialized" to isInitialized.get(),
+            "progress_percent" to progressPercent
         )
+    }
+    
+    /**
+     * Update real-time task progress (independent of checkpointing)
+     * This can be called by Python code via callback to report progress
+     * Works even when checkpointing is disabled
+     * 
+     * @param progressPercent Progress percentage (0-100)
+     */
+    fun updateProgress(progressPercent: Float) {
+        if (isTaskRunning.get()) {
+            val clampedProgress = progressPercent.coerceIn(0f, 100f)
+            val previousProgress = currentProgress.get()
+            currentProgress.set(clampedProgress)
+            lastProgressUpdate.set(System.currentTimeMillis())
+            Log.d(TAG, "Progress updated: $clampedProgress%")
+            
+            // Log milestone events (every 25%)
+            val prevMilestone = (previousProgress / 25).toInt()
+            val currMilestone = (clampedProgress / 25).toInt()
+            if (currMilestone > prevMilestone) {
+                val taskId = currentTaskId.get() ?: "unknown"
+                EventLogger.info(EventLogger.Categories.PROGRESS, "Task $taskId: ${clampedProgress.toInt()}% complete")
+            }
+        }
     }
     
     /**
