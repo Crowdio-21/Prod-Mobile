@@ -61,9 +61,9 @@ class ActivityAdapter : ListAdapter<Activity, ActivityAdapter.ActivityViewHolder
         
         private fun setStatusIcon(status: String) {
             val (icon, color) = when (status) {
-                "executing" -> "⚡" to ContextCompat.getColor(context, R.color.primary_color)
-                "completed" -> "✅" to ContextCompat.getColor(context, R.color.success)
-                "failed" -> "❌" to ContextCompat.getColor(context, R.color.error)
+                "executing" -> "[Executing]" to ContextCompat.getColor(context, R.color.primary_color)
+                "completed" -> "[Completed]" to ContextCompat.getColor(context, R.color.success)
+                "failed" -> "[Failed]" to ContextCompat.getColor(context, R.color.error)
                 "pending" -> "⏳" to ContextCompat.getColor(context, R.color.warning)
                 else -> "ℹ️" to ContextCompat.getColor(context, R.color.primary_color)
             }
