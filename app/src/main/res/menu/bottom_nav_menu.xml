@@ -1,27 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
     <item
-        android:id="@+id/navigation_dashboard"
-        android:icon="@drawable/ic_dashboard"
-        android:title="@string/title_dashboard" />
-
+        android:id="@+id/navigation_tasks"
+        android:icon="@drawable/ic_tasks"
+        android:title="Tasks" />
     <item
-        android:id="@+id/navigation_jobs"
-        android:icon="@drawable/ic_jobs"
-        android:title="@string/title_jobs" />
-
+        android:id="@+id/navigation_settings"
+        android:icon="@drawable/ic_settings"
+        android:title="Settings" />
     <item
-        android:id="@+id/navigation_workers"
-        android:icon="@drawable/ic_workers"
-        android:title="@string/title_workers" />
-
-    <item
-        android:id="@+id/navigation_activity"
-        android:icon="@drawable/ic_activity"
-        android:title="@string/title_activity" />
-
-    <item
-        android:id="@+id/navigation_worker_control"
-        android:icon="@drawable/ic_worker"
-        android:title="@string/title_worker_control" />
+        android:id="@+id/navigation_notifications"
+        android:icon="@drawable/ic_notifications"
+        android:title="Notifications" />
 </menu>

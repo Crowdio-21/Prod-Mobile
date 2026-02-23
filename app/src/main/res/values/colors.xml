@@ -3,6 +3,8 @@
     <!-- Light Theme Colors -->
     <color name="primary">#1976D2</color>
     <color name="primary_dark">#1565C0</color>
+    <color name="primary_darker">#0D47A1</color>
+    <color name="title_bar_blue">#0A3D7A</color>
     <color name="primary_light">#BBDEFB</color>
     <color name="accent">#FF5722</color>
     <color name="surface_primary">#FFFFFF</color>
