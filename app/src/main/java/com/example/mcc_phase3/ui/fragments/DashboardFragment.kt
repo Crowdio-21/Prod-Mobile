@@ -75,13 +75,13 @@ class DashboardFragment : Fragment() {
     }
     
     private fun setupSwipeRefresh() {
-        Log.d(TAG, "🔄 setupSwipeRefresh() called")
+        Log.d(TAG, "setupSwipeRefresh() called")
         try {
             binding.swipeRefresh.setOnRefreshListener {
-                Log.d(TAG, "🔄 SwipeRefresh triggered - loading data")
+                Log.d(TAG, "SwipeRefresh triggered - loading data")
                 viewModel.handleEvent(MainEvent.LoadData)
             }
-            Log.d(TAG, "🔄 SwipeRefresh listener set successfully")
+            Log.d(TAG, "SwipeRefresh listener set successfully")
         } catch (e: Exception) {
             Log.e(TAG, "💥 Error setting up SwipeRefresh", e)
         }
@@ -98,15 +98,15 @@ class DashboardFragment : Fragment() {
                         binding.swipeRefresh.isRefreshing = true
                     }
                     is MainState.Success -> {
-                        Log.d(TAG, "✅ Success state - updating dashboard")
+                        Log.d(TAG, "Success state - updating dashboard")
                         binding.swipeRefresh.isRefreshing = false
                         updateDashboard(state)
                         // Update connection status
-                        Log.d(TAG, "🔌 Updating connection status: ${state.isWebSocketConnected}")
+                        Log.d(TAG, "Updating connection status: ${state.isWebSocketConnected}")
                         updateConnectionStatus(state.isWebSocketConnected)
                     }
                     is MainState.Error -> {
-                        Log.e(TAG, "❌ Error state: ${state.message}")
+                        Log.e(TAG, "Error state: ${state.message}")
                         binding.swipeRefresh.isRefreshing = false
                         // Show disconnected when in error state
                         updateConnectionStatus(false)
@@ -121,25 +121,25 @@ class DashboardFragment : Fragment() {
     }
     
     private fun updateDashboard(state: MainState.Success) {
-        Log.d(TAG, "📊 updateDashboard() called")
+        Log.d(TAG, "updateDashboard() called")
         try {
             // Update stats
             state.stats?.let { stats ->
-                Log.d(TAG, "📊 Updating stats: totalJobs=${stats.totalJobs}, totalTasks=${stats.totalTasks}, totalWorkers=${stats.totalWorkers}")
+                Log.d(TAG, "Updating stats: totalJobs=${stats.totalJobs}, totalTasks=${stats.totalTasks}, totalWorkers=${stats.totalWorkers}")
                 binding.totalJobsValue.text = stats.totalJobs.toString()
                 binding.totalTasksValue.text = stats.totalTasks.toString()
                 binding.activeJobsValue.text = stats.activeJobs.toString()
                 binding.completedJobsValue.text = stats.completedJobs.toString()
-                Log.d(TAG, "📊 Stats updated successfully")
-            } ?: Log.w(TAG, "📊 Stats data is null")
+                Log.d(TAG, "Stats updated successfully")
+            } ?: Log.w(TAG, "Stats data is null")
             
             // Update WebSocket stats
             state.websocketStats?.let { wsStats ->
-                Log.d(TAG, "🔌 Updating WebSocket stats: connected=${wsStats.connectedWorkers}, available=${wsStats.availableWorkers}")
+                Log.d(TAG, "Updating WebSocket stats: connected=${wsStats.connectedWorkers}, available=${wsStats.availableWorkers}")
                 binding.connectedWorkersValue.text = wsStats.connectedWorkers.toString()
                 binding.availableWorkersValue.text = wsStats.availableWorkers.toString()
-                Log.d(TAG, "🔌 WebSocket stats updated successfully")
-            } ?: Log.w(TAG, "🔌 WebSocket stats data is null")
+                Log.d(TAG, "WebSocket stats updated successfully")
+            } ?: Log.w(TAG, "WebSocket stats data is null")
             
             // Update recent activities (filtered for this device)
             val filteredActivities = viewModel.getActivityForCurrentWorker()
@@ -148,14 +148,14 @@ class DashboardFragment : Fragment() {
             activityAdapter.submitList(displayActivities)
             Log.d(TAG, "📈 Activities updated successfully")
             
-            Log.d(TAG, "📊 Dashboard update completed")
+            Log.d(TAG, "Dashboard update completed")
         } catch (e: Exception) {
             Log.e(TAG, "💥 Error updating dashboard", e)
         }
     }
     
     private fun updateConnectionStatus(isConnected: Boolean) {
-        Log.d(TAG, "🔌 updateConnectionStatus() called with isConnected: $isConnected")
+        Log.d(TAG, "updateConnectionStatus() called with isConnected: $isConnected")
         try {
             binding.connectionStatusText.text = if (isConnected) "Connected" else "Disconnected"
             binding.connectionStatusText.setTextColor(
@@ -164,7 +164,7 @@ class DashboardFragment : Fragment() {
                     else R.color.error
                 )
             )
-            Log.d(TAG, "🔌 Connection status updated successfully")
+            Log.d(TAG, "Connection status updated successfully")
         } catch (e: Exception) {
             Log.e(TAG, "💥 Error updating connection status", e)
         }
