@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="true"
@@ -80,6 +81,41 @@
             android:launchMode="singleTop"
             android:parentActivityName=".MainActivity"
             android:windowSoftInputMode="adjustResize" />
+        
+        <activity
+            android:name=".ui.activities.PreferencesActivity"
+            android:exported="false"
+            android:label="Preferences"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.HelpActivity"
+            android:exported="false"
+            android:label="Help"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.ReportIssueActivity"
+            android:exported="false"
+            android:label="Report Issue"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.AboutActivity"
+            android:exported="false"
+            android:label="About"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.EventLogActivity"
+            android:exported="false"
+            android:label="Event Log"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
     </application>
 
 </manifest>
