@@ -108,4 +108,16 @@
         <item name="titleTextColor">@color/text_primary</item>
         <item name="subtitleTextColor">@color/text_secondary</item>
     </style>
+
+    <!-- Transparent trampoline theme for ImagePickerActivity.
+         Must extend an AppCompat/Material3 theme so AppCompatActivity is happy,
+         but the window is fully transparent so it is invisible to the user. -->
+    <style name="Theme.Transparent.AppCompat" parent="AppTheme">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>
