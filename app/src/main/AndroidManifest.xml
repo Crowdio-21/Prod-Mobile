@@ -4,7 +4,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.BATTERY_STATS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
         tools:ignore="ScopedStorage" />
@@ -116,6 +117,14 @@
             android:label="Event Log"
             android:theme="@style/AppTheme"
             android:parentActivityName=".MainActivity" />
+
+        <!-- Transparent trampoline used to display the system image picker
+             when a Python task requires device images (e.g. process_images_on_device). -->
+        <activity
+            android:name=".ui.activities.ImagePickerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Transparent.AppCompat"
+            android:excludeFromRecents="true" />
     </application>
 
 </manifest>
