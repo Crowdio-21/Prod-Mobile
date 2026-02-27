@@ -135,6 +135,7 @@ class TasksFragment : Fragment() {
                             val currentTaskId = taskStatus?.get("current_task_id") as? String
                             val progressPercent = (taskStatus?.get("progress_percent") as? Number)?.toFloat() ?: 0f
                             val isBusy = taskStatus?.get("is_busy") as? Boolean ?: false
+                            val workType = taskStatus?.get("work_type") as? String ?: "Other"
                             
                             // Update debug info (only if fragment is still attached)
                             if (isAdded && view != null) {
@@ -164,7 +165,8 @@ class TasksFragment : Fragment() {
                                         name = "Task $currentTaskId",
                                         status = "Running",
                                         progress = progress,
-                                        executionTime = executionTime
+                                        executionTime = executionTime,
+                                        workType = workType
                                     )
                                 )
                                 
