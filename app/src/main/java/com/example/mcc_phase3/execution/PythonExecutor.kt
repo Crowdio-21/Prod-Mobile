@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import com.example.mcc_phase3.execution.ImagePickerManager
 
 /**
  * PythonExecutor handles only Python code execution via Chaquopy
@@ -228,14 +229,27 @@ print("[Android Worker] Checkpoint capture disabled")
                 // Set up progress callback for real-time progress reporting
                 setupProgressCallback()
 
+                // If the function processes device images, prompt the user to select
+                // images from the gallery and inject their paths before execution.
+                if (requiresImageSelection(pythonCode)) {
+                    Log.d(TAG, "Image-processing function detected – launching image picker")
+                    val selectedPaths = ImagePickerManager.getInstance()
+                        .awaitImageSelection(context)
+                    injectSelectedImages(selectedPaths)
+                    Log.d(TAG, "Injected ${selectedPaths.size} image path(s) into builtins._selected_images")
+                }
+
                 // Execute the Python code using the desktop worker approach
                 val result = executeFunctionCode(pythonCode, args)
-                
+
                 // Clean up checkpoint callback
                 cleanupCheckpointCallback()
-                
+
                 // Clean up progress callback
                 cleanupProgressCallback()
+
+                // Clean up injected image paths
+                cleanupSelectedImages()
 
                 Log.d(TAG, "Python code executed successfully")
                 mapOf<String, Any?>(
@@ -248,16 +262,26 @@ print("[Android Worker] Checkpoint capture disabled")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to execute Python code", e)
                 EventLogger.error(EventLogger.Categories.PYTHON, "Python execution failed: ${e.message}")
+                // Encode the error as a JSON string so the backend always receives a parseable result
+                val errorJson = try {
+                    org.json.JSONObject().apply {
+                        put("error", e.message ?: "Unknown error")
+                        put("error_type", e.javaClass.simpleName)
+                        put("status", "error")
+                    }.toString()
+                } catch (_: Exception) {
+                    """{"error":"execution_failed","status":"error"}"""
+                }
                 mapOf<String, Any?>(
                     "status" to "error",
                     "message" to "Execution failed: ${e.message ?: "Unknown error"}",
-                    "result" to null,
+                    "result" to errorJson,
                     "error" to e.toString()
                 )
             }
         }
     }
-    
+
     /**
      * Execute Python code with restored checkpoint state (for task resumption)
      * 
@@ -1556,6 +1580,77 @@ def sentiment_analysis_worker(message_data):
         }
     }
     
+    // ── Image-selection helpers ──────────────────────────────────────────────
+
+    /**
+     * Returns true when the Python code looks like an image-processing function
+     * that needs the user to supply images from the device gallery.
+     *
+     * Detection criteria (any one is sufficient):
+     *  - Function name contains "process_images"
+     *  - Function body imports PIL/Pillow (from PIL import …)
+     *  - Function name contains "image" **and** uses PIL/glob/base64
+     */
+    private fun requiresImageSelection(code: String): Boolean {
+        val funcName = extractFunctionName(code)?.lowercase() ?: ""
+        val lowerCode = code.lowercase()
+
+        // Strongest explicit signal: backend code already references the injected variable
+        if (lowerCode.contains("_selected_images")) return true
+
+        // Explicit image-processing function name
+        if (funcName.contains("process_images") || funcName.contains("image_process")) return true
+
+        // PIL is imported AND glob is used specifically to search for image files by extension
+        val importsPil = lowerCode.contains("from pil import") ||
+                         lowerCode.contains("import pil.")  ||
+                         lowerCode.contains("import pil\n") ||
+                         lowerCode.contains("import pil ")
+        val imageGlobSearch = lowerCode.contains("glob.glob") &&
+                              (lowerCode.contains(".jpg") || lowerCode.contains(".png") ||
+                               lowerCode.contains(".jpeg") || lowerCode.contains(".bmp") ||
+                               lowerCode.contains(".gif")  || lowerCode.contains(".webp"))
+
+        return importsPil && imageGlobSearch && funcName.contains("image")
+    }
+
+    /**
+     * Injects the selected image file paths into Python builtins so that any
+     * executing Python function can access them as:
+     *
+     *   import builtins
+     *   paths = builtins._selected_images   # list[str]
+     *
+     * @param paths Absolute file-system paths returned by [ImagePickerManager].
+     */
+    private fun injectSelectedImages(paths: List<String>) {
+        try {
+            val pyList = builtinsModule?.callAttr("list") ?: return
+            paths.forEach { path -> pyList.callAttr("append", path) }
+            builtinsModule?.put("_selected_images", pyList)
+            Log.d(TAG, "builtins._selected_images set to $paths")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to inject selected images: ${e.message}")
+        }
+    }
+
+    /**
+     * Removes [_selected_images] from Python builtins after the task finishes.
+     */
+    private fun cleanupSelectedImages() {
+        try {
+            val hasAttr = builtinsModule?.callAttr("hasattr", builtinsModule, "_selected_images")
+                ?.toJava(Boolean::class.java) == true
+            if (hasAttr) {
+                builtinsModule?.callAttr("delattr", builtinsModule, "_selected_images")
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "cleanupSelectedImages: ${e.message}")
+        }
+    }
+
+    // ── Function execution ───────────────────────────────────────────────────
+
     /**
      * Execute function code using desktop worker approach
      * Matches the desktop worker's _execute_task method
@@ -1683,11 +1778,20 @@ def sentiment_analysis_worker(message_data):
             
             // Convert PyObject result to proper Java type
             if (pyResult == null) {
-                return "null"
+                Log.d(TAG, "Function returned Kotlin null – using empty result")
+                return "{}"
             }
-            
-            // Check if it's a Python dict and convert to JSON string
+
+            // Check for Python None (pyResult is a PyObject wrapping None)
             val builtins = pythonInstance?.getModule("builtins")
+            val noneType = builtins?.callAttr("type", builtins.get("None"))
+            val isNone = builtins?.callAttr("isinstance", pyResult, noneType)?.toJava(Boolean::class.java) == true
+            if (isNone) {
+                Log.d(TAG, "Function returned Python None – using empty result")
+                return "{}"
+            }
+
+            // Check if it's a Python dict and convert to JSON string
             val dictType = builtins?.get("dict")
             val isDict = builtins?.callAttr("isinstance", pyResult, dictType)?.toJava(Boolean::class.java) == true
             
@@ -1708,15 +1812,16 @@ def sentiment_analysis_worker(message_data):
             // For other types, try to convert via JSON
             try {
                 val jsonStr = jsonModule?.callAttr("dumps", pyResult)?.toString()
-                if (jsonStr != null) {
+                if (jsonStr != null && jsonStr != "null") {
                     return jsonStr
                 }
             } catch (e: Exception) {
                 Log.d(TAG, "JSON conversion failed, using toString: ${e.message}")
             }
-            
-            // Fallback to string representation
-            pyResult.toString()
+
+            // Fallback to string representation (exclude bare "null")
+            val strRepr = pyResult.toString()
+            if (strRepr == "null" || strRepr == "None") "{}" else strRepr
             
         } catch (e: Exception) {
             Log.e(TAG, "Error executing function with arguments", e)
