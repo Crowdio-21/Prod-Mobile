@@ -44,6 +44,10 @@ class PythonExecutor(private val context: Context) {
     private var jsonModule: PyObject? = null
     private var base64Module: PyObject? = null
     
+    // Execution namespace for cooperative task control (pause/resume/kill)
+    // Stores the globals dict from the last exec() so control functions can be called
+    private val executionNamespace = AtomicReference<PyObject?>(null)
+    
     /**
      * Set the checkpoint handler for progress updates during Python execution
      */
@@ -1937,6 +1941,10 @@ def sentiment_analysis_worker(message_data):
             // Execute the function code in the local namespace (equivalent to exec(func_code, {}, local_vars))
             builtinsModule?.callAttr("exec", funcCode, globalVars, localVars)
             
+            // Store the local namespace so cooperative control functions (pause/resume/kill)
+            // defined in the instrumented code can be called from Kotlin later
+            executionNamespace.set(localVars)
+            
             // Find the function object in local_vars (equivalent to finding types.FunctionType)
             val typesModule = pythonInstance?.getModule("types")
             val functionType = typesModule?.get("FunctionType")
@@ -2049,12 +2057,91 @@ def sentiment_analysis_worker(message_data):
         }
     }
     
+    // ── Cooperative task control (pause / resume / kill) ──────────────
+
+    /**
+     * Call the Python `pause()` function defined in the running instrumented code.
+     * Sets the `paused` flag so the Python loop will spin-wait.
+     */
+    fun pauseTask() {
+        try {
+            val ns = executionNamespace.get()
+            if (ns != null) {
+                val pauseFn = ns.callAttr("get", "pause")
+                if (pauseFn != null && pauseFn.toString() != "None") {
+                    pauseFn.call()
+                    Log.d(TAG, "Python pause() called")
+                } else {
+                    Log.w(TAG, "pause() not found in execution namespace")
+                }
+            } else {
+                Log.w(TAG, "No execution namespace – cannot pause")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to call Python pause()", e)
+        }
+    }
+
+    /**
+     * Call the Python `resume()` function defined in the running instrumented code.
+     * Clears the `paused` flag so the Python loop continues.
+     */
+    fun resumeTask() {
+        try {
+            val ns = executionNamespace.get()
+            if (ns != null) {
+                val resumeFn = ns.callAttr("get", "resume")
+                if (resumeFn != null && resumeFn.toString() != "None") {
+                    resumeFn.call()
+                    Log.d(TAG, "Python resume() called")
+                } else {
+                    Log.w(TAG, "resume() not found in execution namespace")
+                }
+            } else {
+                Log.w(TAG, "No execution namespace – cannot resume")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to call Python resume()", e)
+        }
+    }
+
+    /**
+     * Call the Python `kill()` function defined in the running instrumented code.
+     * Sets the `killed` flag so the Python loop exits cooperatively.
+     */
+    fun killTask() {
+        try {
+            val ns = executionNamespace.get()
+            if (ns != null) {
+                val killFn = ns.callAttr("get", "kill")
+                if (killFn != null && killFn.toString() != "None") {
+                    killFn.call()
+                    Log.d(TAG, "Python kill() called")
+                } else {
+                    Log.w(TAG, "kill() not found in execution namespace")
+                }
+            } else {
+                Log.w(TAG, "No execution namespace – cannot kill")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to call Python kill()", e)
+        }
+    }
+
+    /**
+     * Clear the stored execution namespace (called after task completes).
+     */
+    fun clearExecutionNamespace() {
+        executionNamespace.set(null)
+    }
+
     /**
      * Cleanup resources
      */
     fun cleanup() {
         try {
             Log.d(TAG, "Cleaning up Python executor...")
+            executionNamespace.set(null)
             isInitialized.set(false)
             pythonInstance = null
             builtinsModule = null

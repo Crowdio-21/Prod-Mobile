@@ -59,6 +59,7 @@ class TaskProcessor(private val context: Context) {
     private val currentTaskId = AtomicReference<String?>(null)
     private val currentJobId = AtomicReference<String?>(null)
     private val isTaskRunning = AtomicBoolean(false)
+    private val isTaskPaused = AtomicBoolean(false)
     private val taskStartTime = AtomicReference<Long?>(null)
     
     // Real-time progress tracking (independent of checkpointing)
@@ -303,9 +304,11 @@ class TaskProcessor(private val context: Context) {
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
+                isTaskPaused.set(false)
                 taskStartTime.set(null)
                 currentProgress.set(0f)
                 currentWorkType.set("Other")
+                pythonExecutor.clearExecutionNamespace()
             }
             
         } catch (e: Exception) {
@@ -315,9 +318,11 @@ class TaskProcessor(private val context: Context) {
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
+            isTaskPaused.set(false)
             taskStartTime.set(null)
             currentProgress.set(0f)
             currentWorkType.set("Other")
+            pythonExecutor.clearExecutionNamespace()
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -523,6 +528,8 @@ class TaskProcessor(private val context: Context) {
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
+                isTaskPaused.set(false)
+                pythonExecutor.clearExecutionNamespace()
             }
             
         } catch (e: Exception) {
@@ -530,6 +537,8 @@ class TaskProcessor(private val context: Context) {
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
+            isTaskPaused.set(false)
+            pythonExecutor.clearExecutionNamespace()
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -597,6 +606,8 @@ class TaskProcessor(private val context: Context) {
                 Log.d(TAG, "Cancelling task: $taskId")
                 currentTaskId.set(null)
                 isTaskRunning.set(false)
+                isTaskPaused.set(false)
+                pythonExecutor.clearExecutionNamespace()
                 
                 val response = JSONObject().apply {
                     put("type", RESPONSE_TYPE_TASK_RESULT)
@@ -822,6 +833,7 @@ class TaskProcessor(private val context: Context) {
         
         return mapOf<String, Any>(
             "is_busy" to isBusy,
+            "is_paused" to isTaskPaused.get(),
             "current_task_id" to taskId,
             "current_job_id" to jobId,
             "python_ready" to pythonExecutor.isReady(),
@@ -933,11 +945,68 @@ class TaskProcessor(private val context: Context) {
             processorScope.cancel()
             currentTaskId.set(null)
             isTaskRunning.set(false)
+            isTaskPaused.set(false)
             isInitialized.set(false)
+            pythonExecutor.clearExecutionNamespace()
             pythonExecutor.cleanup()
             Log.d(TAG, " TaskProcessor cleaned up")
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }
+    }
+
+    // ── Cooperative task control (pause / resume / kill) ──────────────────
+
+    /**
+     * Pause the currently running task by calling the instrumented Python pause() function.
+     * Only effective if a task is actively running.
+     */
+    fun pauseCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "No task running – cannot pause")
+            return
+        }
+        if (isTaskPaused.get()) {
+            Log.w(TAG, "Task already paused")
+            return
+        }
+        pythonExecutor.pauseTask()
+        isTaskPaused.set(true)
+        Log.i(TAG, "Task ${currentTaskId.get()} paused")
+        EventLogger.info(EventLogger.Categories.TASK, "Task ${currentTaskId.get()} paused")
+    }
+
+    /**
+     * Resume the currently paused task by calling the instrumented Python resume() function.
+     * Only effective if a task is paused.
+     */
+    fun resumeCurrentTask() {
+        if (!isTaskPaused.get()) {
+            Log.w(TAG, "Task is not paused – cannot resume")
+            return
+        }
+        pythonExecutor.resumeTask()
+        isTaskPaused.set(false)
+        Log.i(TAG, "Task ${currentTaskId.get()} resumed")
+        EventLogger.info(EventLogger.Categories.TASK, "Task ${currentTaskId.get()} resumed")
+    }
+
+    /**
+     * Kill the currently running task by calling the instrumented Python kill() function.
+     * The Python loop will exit cooperatively on the next iteration.
+     */
+    fun killCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "No task running – cannot kill")
+            return
+        }
+        // If paused, resume first so the loop can see the killed flag
+        if (isTaskPaused.get()) {
+            pythonExecutor.resumeTask()
+            isTaskPaused.set(false)
+        }
+        pythonExecutor.killTask()
+        Log.i(TAG, "Task ${currentTaskId.get()} kill requested")
+        EventLogger.info(EventLogger.Categories.TASK, "Task ${currentTaskId.get()} kill requested")
     }
 }
