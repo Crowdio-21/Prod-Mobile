@@ -303,33 +303,6 @@ class MobileWorkerService : Service() {
         }
     }
 
-    // ── Cooperative task control (pause / resume / kill) ──────────────
-
-    /**
-     * Pause the currently executing Python task.
-     * Delegates to TaskProcessor → PythonExecutor cooperative control.
-     */
-    fun pauseCurrentTask() {
-        taskProcessor.pauseCurrentTask()
-        // Disconnect from foreman while task is paused
-        webSocketClient.disconnect()
-        Log.d(TAG, "Disconnected from foreman due to task pause")
-    }
-
-    /**
-     * Resume the currently paused Python task.
-     */
-    fun resumeCurrentTask() {
-        taskProcessor.resumeCurrentTask()
-    }
-
-    /**
-     * Kill (cancel) the currently executing Python task.
-     */
-    fun killCurrentTask() {
-        taskProcessor.killCurrentTask()
-    }
-
     /**
      * Get worker status
      */
@@ -350,6 +323,23 @@ class MobileWorkerService : Service() {
             Log.e(TAG, "Failed to get worker status", e)
             null
         }
+    }
+
+    // ── Task control (pause / resume / kill) ────────────────────────
+
+    /** Pause the currently running Python task. */
+    fun pauseCurrentTask() {
+        taskProcessor.pauseCurrentTask()
+    }
+
+    /** Resume a paused Python task. */
+    fun resumeCurrentTask() {
+        taskProcessor.resumeCurrentTask()
+    }
+
+    /** Kill (cancel) the currently running Python task. */
+    fun killCurrentTask() {
+        taskProcessor.killCurrentTask()
     }
 
     /**

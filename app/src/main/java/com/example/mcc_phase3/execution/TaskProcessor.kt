@@ -66,6 +66,12 @@ class TaskProcessor(private val context: Context) {
     private val currentProgress = AtomicReference<Float>(0f)
     private val lastProgressUpdate = AtomicReference<Long>(0L)
 
+    // Pause-aware progress: caches last reported value so the bar doesn't drop to 0% when paused
+    private val lastKnownProgress = AtomicReference<Float>(0f)
+    // Tracks when the current pause started, and cumulative ms spent paused (for time-based fallback)
+    private val pausedAtTime = AtomicReference<Long?>(null)
+    private val totalPausedMs = AtomicReference<Long>(0L)
+
     // Work type detected from incoming func_code
     private val currentWorkType = AtomicReference<String>("Other")
     
@@ -189,6 +195,9 @@ class TaskProcessor(private val context: Context) {
             isTaskRunning.set(true)
             taskStartTime.set(System.currentTimeMillis())
             currentProgress.set(0f)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
             Log.d(TAG, "Task $taskId started at ${taskStartTime.get()}")
             EventLogger.info(EventLogger.Categories.TASK, "Task $taskId started (Job: $jobId)")
             NotificationHelper.notifyTaskAssigned(context, taskId, jobId)
@@ -304,11 +313,12 @@ class TaskProcessor(private val context: Context) {
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
-                isTaskPaused.set(false)
                 taskStartTime.set(null)
                 currentProgress.set(0f)
+                lastKnownProgress.set(0f)
+                pausedAtTime.set(null)
+                totalPausedMs.set(0L)
                 currentWorkType.set("Other")
-                pythonExecutor.clearExecutionNamespace()
             }
             
         } catch (e: Exception) {
@@ -318,11 +328,12 @@ class TaskProcessor(private val context: Context) {
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
-            isTaskPaused.set(false)
             taskStartTime.set(null)
             currentProgress.set(0f)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
             currentWorkType.set("Other")
-            pythonExecutor.clearExecutionNamespace()
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -528,8 +539,6 @@ class TaskProcessor(private val context: Context) {
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
-                isTaskPaused.set(false)
-                pythonExecutor.clearExecutionNamespace()
             }
             
         } catch (e: Exception) {
@@ -537,8 +546,6 @@ class TaskProcessor(private val context: Context) {
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
-            isTaskPaused.set(false)
-            pythonExecutor.clearExecutionNamespace()
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -606,8 +613,6 @@ class TaskProcessor(private val context: Context) {
                 Log.d(TAG, "Cancelling task: $taskId")
                 currentTaskId.set(null)
                 isTaskRunning.set(false)
-                isTaskPaused.set(false)
-                pythonExecutor.clearExecutionNamespace()
                 
                 val response = JSONObject().apply {
                     put("type", RESPONSE_TYPE_TASK_RESULT)
@@ -820,13 +825,22 @@ class TaskProcessor(private val context: Context) {
         }
         
         // 3. Fallback to time-based progress if no other source
-        if (progressPercent <= 0f && isBusy && startTime != null) {
-            val elapsedMs = System.currentTimeMillis() - startTime
+        //    Skip when paused – the task isn't making progress, so the bar should freeze.
+        if (progressPercent <= 0f && isBusy && !isTaskPaused.get() && startTime != null) {
+            val elapsedMs = System.currentTimeMillis() - startTime - totalPausedMs.get()
             // Simulate progress: 0-99% spread evenly across the full task timeout window.
-            // Aligning with TASK_TIMEOUT_MS prevents the value from freezing at 99%
-            // for long-running tasks (old 60-second denominator was too short).
             progressPercent = ((elapsedMs / TASK_TIMEOUT_MS.toFloat()) * 99f).coerceIn(0f, 99f)
             Log.d(TAG, "Using time-based fallback progress: $progressPercent% (elapsed: ${elapsedMs}ms)")
+        }
+
+        // When paused and no live source reported a value, return the cached progress
+        if (isTaskPaused.get() && progressPercent <= 0f) {
+            progressPercent = lastKnownProgress.get()
+        }
+
+        // Cache the latest non-zero progress so we can show it while paused
+        if (progressPercent > 0f) {
+            lastKnownProgress.set(progressPercent)
         }
         
         Log.d(TAG, "getCurrentTaskStatus - busy: $isBusy, taskId: $taskId, progress: $progressPercent%")
@@ -936,6 +950,57 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
+     * Pause the currently running task.
+     * Sets the cooperative `paused` flag inside the Python exec namespace.
+     */
+    fun pauseCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "pauseCurrentTask: no task running")
+            return
+        }
+        pythonExecutor.pauseExecution()
+        isTaskPaused.set(true)
+        pausedAtTime.set(System.currentTimeMillis())
+        Log.d(TAG, "Task ${currentTaskId.get()} paused")
+    }
+
+    /**
+     * Resume a paused task.
+     */
+    fun resumeCurrentTask() {
+        if (!isTaskPaused.get()) {
+            Log.w(TAG, "resumeCurrentTask: task is not paused")
+            return
+        }
+        // Accumulate paused duration so time-based fallback stays accurate
+        val pauseStart = pausedAtTime.getAndSet(null)
+        if (pauseStart != null) {
+            totalPausedMs.set(totalPausedMs.get() + (System.currentTimeMillis() - pauseStart))
+        }
+        pythonExecutor.resumeExecution()
+        isTaskPaused.set(false)
+        Log.d(TAG, "Task ${currentTaskId.get()} resumed")
+    }
+
+    /**
+     * Kill (cancel) the currently running task.
+     */
+    fun killCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "killCurrentTask: no task running")
+            return
+        }
+        // If the task is paused, resume it first so the Python `while paused`
+        // loop exits and the code reaches the `if killed` check.
+        if (isTaskPaused.get()) {
+            pythonExecutor.resumeExecution()
+        }
+        pythonExecutor.killExecution()
+        isTaskPaused.set(false)
+        Log.d(TAG, "Task ${currentTaskId.get()} killed")
+    }
+
+    /**
      * Cleanup resources
      */
     fun cleanup() {
@@ -946,67 +1011,14 @@ class TaskProcessor(private val context: Context) {
             currentTaskId.set(null)
             isTaskRunning.set(false)
             isTaskPaused.set(false)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
             isInitialized.set(false)
-            pythonExecutor.clearExecutionNamespace()
             pythonExecutor.cleanup()
             Log.d(TAG, " TaskProcessor cleaned up")
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }
-    }
-
-    // ── Cooperative task control (pause / resume / kill) ──────────────────
-
-    /**
-     * Pause the currently running task by calling the instrumented Python pause() function.
-     * Only effective if a task is actively running.
-     */
-    fun pauseCurrentTask() {
-        if (!isTaskRunning.get()) {
-            Log.w(TAG, "No task running – cannot pause")
-            return
-        }
-        if (isTaskPaused.get()) {
-            Log.w(TAG, "Task already paused")
-            return
-        }
-        pythonExecutor.pauseTask()
-        isTaskPaused.set(true)
-        Log.i(TAG, "Task ${currentTaskId.get()} paused")
-        EventLogger.info(EventLogger.Categories.TASK, "Task ${currentTaskId.get()} paused")
-    }
-
-    /**
-     * Resume the currently paused task by calling the instrumented Python resume() function.
-     * Only effective if a task is paused.
-     */
-    fun resumeCurrentTask() {
-        if (!isTaskPaused.get()) {
-            Log.w(TAG, "Task is not paused – cannot resume")
-            return
-        }
-        pythonExecutor.resumeTask()
-        isTaskPaused.set(false)
-        Log.i(TAG, "Task ${currentTaskId.get()} resumed")
-        EventLogger.info(EventLogger.Categories.TASK, "Task ${currentTaskId.get()} resumed")
-    }
-
-    /**
-     * Kill the currently running task by calling the instrumented Python kill() function.
-     * The Python loop will exit cooperatively on the next iteration.
-     */
-    fun killCurrentTask() {
-        if (!isTaskRunning.get()) {
-            Log.w(TAG, "No task running – cannot kill")
-            return
-        }
-        // If paused, resume first so the loop can see the killed flag
-        if (isTaskPaused.get()) {
-            pythonExecutor.resumeTask()
-            isTaskPaused.set(false)
-        }
-        pythonExecutor.killTask()
-        Log.i(TAG, "Task ${currentTaskId.get()} kill requested")
-        EventLogger.info(EventLogger.Categories.TASK, "Task ${currentTaskId.get()} kill requested")
     }
 }

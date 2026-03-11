@@ -86,60 +86,26 @@
                         android:gravity="center">
 
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/activate_worker_button"
+                            android:id="@+id/connect_button"
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:layout_marginEnd="4dp"
-                            android:text="Activate"
-                            android:textSize="12sp"
+                            android:layout_marginEnd="8dp"
+                            android:text="Connect"
+                            android:textSize="14sp"
                             app:icon="@drawable/ic_status_ok"
                             app:iconGravity="textStart"
                             app:cornerRadius="12dp"
                             android:backgroundTint="@color/success" />
 
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/pause_worker_button"
+                            android:id="@+id/disconnect_button"
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:layout_marginStart="4dp"
-                            android:layout_marginEnd="4dp"
-                            android:text="Pause"
-                            android:textSize="12sp"
-                            android:visibility="gone"
-                            app:icon="@drawable/ic_disconnected"
-                            app:iconGravity="textStart"
-                            app:cornerRadius="12dp"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            app:strokeColor="@color/warning"
-                            android:textColor="@color/warning" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/resume_task_button"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:layout_marginStart="4dp"
-                            android:layout_marginEnd="4dp"
-                            android:text="Resume"
-                            android:textSize="12sp"
-                            android:visibility="gone"
-                            app:icon="@drawable/ic_connected"
-                            app:iconGravity="textStart"
-                            app:cornerRadius="12dp"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            app:strokeColor="@color/info"
-                            android:textColor="@color/info" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/kill_task_button"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:layout_marginStart="4dp"
-                            android:text="Kill"
-                            android:textSize="12sp"
+                            android:layout_marginStart="8dp"
+                            android:text="Disconnect"
+                            android:textSize="14sp"
                             android:enabled="false"
                             app:icon="@drawable/ic_disconnected"
                             app:iconGravity="textStart"

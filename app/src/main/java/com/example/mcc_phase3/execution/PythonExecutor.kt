@@ -35,6 +35,10 @@ class PythonExecutor(private val context: Context) {
     // Checkpoint handler reference for progress updates during execution
     private val checkpointHandlerRef = AtomicReference<CheckpointHandler?>(null)
     
+    // The globals dictionary of the currently-executing task code.
+    // pause/resume/kill MUST target this dict so the flags are visible to the running task.
+    private val execGlobalsRef = AtomicReference<PyObject?>(null)
+    
     // Progress callback for real-time progress updates (independent of checkpointing)
     private var progressCallback: ((Float) -> Unit)? = null
     
@@ -43,10 +47,6 @@ class PythonExecutor(private val context: Context) {
     private var builtinsModule: PyObject? = null
     private var jsonModule: PyObject? = null
     private var base64Module: PyObject? = null
-    
-    // Execution namespace for cooperative task control (pause/resume/kill)
-    // Stores the globals dict from the last exec() so control functions can be called
-    private val executionNamespace = AtomicReference<PyObject?>(null)
     
     /**
      * Set the checkpoint handler for progress updates during Python execution
@@ -1932,20 +1932,21 @@ def sentiment_analysis_worker(message_data):
         return try {
             Log.d(TAG, "Deserializing function: ${funcCode.take(200)}...")
             
-            // Create a local namespace for the exec (equivalent to local_vars = {})
-            val localVars = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            // Use a SINGLE dict for both globals and locals so that module-level
+            // variables (paused, killed) and function definitions (pause, resume,
+            // kill, task function) all share the same namespace.  This is critical:
+            // functions that use `global paused` will reference this dict, so the
+            // flags MUST live here too.
+            val execGlobals = pythonInstance?.getModule("builtins")?.callAttr("dict")
             
-            // Create global namespace (empty dict)
-            val globalVars = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            // Execute the function code — single-dict exec makes globals == locals
+            builtinsModule?.callAttr("exec", funcCode, execGlobals)
             
-            // Execute the function code in the local namespace (equivalent to exec(func_code, {}, local_vars))
-            builtinsModule?.callAttr("exec", funcCode, globalVars, localVars)
+            // Save the reference so pause/resume/kill can target the same namespace
+            execGlobalsRef.set(execGlobals)
+            Log.d(TAG, "Saved execGlobals reference for task control")
             
-            // Store the local namespace so cooperative control functions (pause/resume/kill)
-            // defined in the instrumented code can be called from Kotlin later
-            executionNamespace.set(localVars)
-            
-            // Find the function object in local_vars (equivalent to finding types.FunctionType)
+            // Find the function object in execGlobals
             val typesModule = pythonInstance?.getModule("types")
             val functionType = typesModule?.get("FunctionType")
             
@@ -1954,7 +1955,7 @@ def sentiment_analysis_worker(message_data):
             // Try to find function by name first (more reliable)
             val functionName = extractFunctionName(funcCode)
             if (functionName != null) {
-                val namedFunc = localVars?.get(functionName)
+                val namedFunc = execGlobals?.get(functionName)
                 if (namedFunc != null) {
                     val isInstance = functionType?.callAttr("__instancecheck__", namedFunc)
                     if (isInstance?.toJava(Boolean::class.java) == true) {
@@ -1968,15 +1969,13 @@ def sentiment_analysis_worker(message_data):
             if (func == null) {
                 Log.d(TAG, "Function not found by name, searching through all values...")
                 
-                // Convert dict_values to list first (equivalent to list(local_vars.values()))
-                val values = localVars?.callAttr("values")
+                val values = execGlobals?.callAttr("values")
                 val valuesList = builtinsModule?.callAttr("list", values)
                 val valuesJavaList = valuesList?.asList()
                 
                 valuesJavaList?.forEach { value ->
                     val pyValue = value as? PyObject
                     if (pyValue != null) {
-                        // Check if the value is an instance of FunctionType
                         val isInstance = functionType?.callAttr("__instancecheck__", pyValue)
                         if (isInstance?.toJava(Boolean::class.java) == true) {
                             func = pyValue
@@ -1988,11 +1987,10 @@ def sentiment_analysis_worker(message_data):
             }
             
             if (func == null) {
-                // Log all available keys for debugging
-                val keys = localVars?.callAttr("keys")
+                val keys = execGlobals?.callAttr("keys")
                 val keysList = builtinsModule?.callAttr("list", keys)
                 val keysJavaList = keysList?.asList()
-                Log.e(TAG, "Available keys in local_vars: $keysJavaList")
+                Log.e(TAG, "Available keys in execGlobals: $keysJavaList")
                 throw Exception("No function could be deserialized from code string. Available keys: $keysJavaList")
             }
             
@@ -2057,82 +2055,106 @@ def sentiment_analysis_worker(message_data):
         }
     }
     
-    // ── Cooperative task control (pause / resume / kill) ──────────────
+    // ── Task control (pause / resume / kill) ────────────────────────────────
 
     /**
-     * Call the Python `pause()` function defined in the running instrumented code.
-     * Sets the `paused` flag so the Python loop will spin-wait.
+     * Helper: read a value from the exec globals *dict* by key.
+     * Uses dict.get(key) so it returns Python None (mapped to null) when absent.
+     * Do NOT use PyObject.get() – that calls getattr(), which doesn't work on dicts.
      */
-    fun pauseTask() {
+    private fun dictGet(dict: PyObject, key: String): PyObject? {
+        val value = dict.callAttr("get", key)
+        // Chaquopy wraps Python None as a non-null PyObject; detect it explicitly.
+        val builtins = pythonInstance?.getModule("builtins") ?: return null
+        val isNone = builtins.callAttr("isinstance", value,
+            builtins.callAttr("type", builtins.get("None"))
+        )?.toJava(Boolean::class.java) == true
+        return if (isNone) null else value
+    }
+
+    /**
+     * Helper: set a value in the exec globals *dict*.
+     * Uses dict.__setitem__ instead of PyObject.put() (which calls setattr).
+     */
+    private fun dictSet(dict: PyObject, key: String, value: Any?) {
+        dict.callAttr("__setitem__", key, value)
+    }
+
+    /**
+     * Pause the currently running task by setting the `paused` flag in the
+     * exec globals dict that the task code is actively reading.
+     */
+    fun pauseExecution() {
+        val globals = execGlobalsRef.get()
+        if (globals == null) {
+            Log.w(TAG, "pauseExecution: no execGlobals – task may not be running")
+            return
+        }
         try {
-            val ns = executionNamespace.get()
-            if (ns != null) {
-                val pauseFn = ns.callAttr("get", "pause")
-                if (pauseFn != null && pauseFn.toString() != "None") {
-                    pauseFn.call()
-                    Log.d(TAG, "Python pause() called")
-                } else {
-                    Log.w(TAG, "pause() not found in execution namespace")
-                }
+            // Prefer calling the pause() function defined in the task code so
+            // that any side-effects (e.g. checkpoint flush) are honoured.
+            val pauseFn = dictGet(globals, "pause")
+            if (pauseFn != null) {
+                pauseFn.call()
+                Log.d(TAG, "pauseExecution: called pause() in exec namespace")
             } else {
-                Log.w(TAG, "No execution namespace – cannot pause")
+                // Fallback: set the flag directly in the dict
+                dictSet(globals, "paused", true)
+                Log.d(TAG, "pauseExecution: set paused=True directly in execGlobals")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to call Python pause()", e)
+            // Last-resort fallback
+            try { dictSet(globals, "paused", true) } catch (_: Exception) {}
+            Log.w(TAG, "pauseExecution error (flag set via fallback): ${e.message}")
         }
     }
 
     /**
-     * Call the Python `resume()` function defined in the running instrumented code.
-     * Clears the `paused` flag so the Python loop continues.
+     * Resume the currently paused task.
      */
-    fun resumeTask() {
+    fun resumeExecution() {
+        val globals = execGlobalsRef.get()
+        if (globals == null) {
+            Log.w(TAG, "resumeExecution: no execGlobals – task may not be running")
+            return
+        }
         try {
-            val ns = executionNamespace.get()
-            if (ns != null) {
-                val resumeFn = ns.callAttr("get", "resume")
-                if (resumeFn != null && resumeFn.toString() != "None") {
-                    resumeFn.call()
-                    Log.d(TAG, "Python resume() called")
-                } else {
-                    Log.w(TAG, "resume() not found in execution namespace")
-                }
+            val resumeFn = dictGet(globals, "resume")
+            if (resumeFn != null) {
+                resumeFn.call()
+                Log.d(TAG, "resumeExecution: called resume() in exec namespace")
             } else {
-                Log.w(TAG, "No execution namespace – cannot resume")
+                dictSet(globals, "paused", false)
+                Log.d(TAG, "resumeExecution: set paused=False directly in execGlobals")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to call Python resume()", e)
+            try { dictSet(globals, "paused", false) } catch (_: Exception) {}
+            Log.w(TAG, "resumeExecution error (flag set via fallback): ${e.message}")
         }
     }
 
     /**
-     * Call the Python `kill()` function defined in the running instrumented code.
-     * Sets the `killed` flag so the Python loop exits cooperatively.
+     * Kill (cancel) the currently running task.
      */
-    fun killTask() {
+    fun killExecution() {
+        val globals = execGlobalsRef.get()
+        if (globals == null) {
+            Log.w(TAG, "killExecution: no execGlobals – task may not be running")
+            return
+        }
         try {
-            val ns = executionNamespace.get()
-            if (ns != null) {
-                val killFn = ns.callAttr("get", "kill")
-                if (killFn != null && killFn.toString() != "None") {
-                    killFn.call()
-                    Log.d(TAG, "Python kill() called")
-                } else {
-                    Log.w(TAG, "kill() not found in execution namespace")
-                }
+            val killFn = dictGet(globals, "kill")
+            if (killFn != null) {
+                killFn.call()
+                Log.d(TAG, "killExecution: called kill() in exec namespace")
             } else {
-                Log.w(TAG, "No execution namespace – cannot kill")
+                dictSet(globals, "killed", true)
+                Log.d(TAG, "killExecution: set killed=True directly in execGlobals")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to call Python kill()", e)
+            try { dictSet(globals, "killed", true) } catch (_: Exception) {}
+            Log.w(TAG, "killExecution error (flag set via fallback): ${e.message}")
         }
-    }
-
-    /**
-     * Clear the stored execution namespace (called after task completes).
-     */
-    fun clearExecutionNamespace() {
-        executionNamespace.set(null)
     }
 
     /**
@@ -2141,7 +2163,7 @@ def sentiment_analysis_worker(message_data):
     fun cleanup() {
         try {
             Log.d(TAG, "Cleaning up Python executor...")
-            executionNamespace.set(null)
+            execGlobalsRef.set(null)
             isInitialized.set(false)
             pythonInstance = null
             builtinsModule = null
