@@ -1277,7 +1277,7 @@ def sentiment_analysis_worker(message_data):
                     
                     // Add resume logic if this is a resume execution
                     if (isResume && !addedResumeLogic) {
-                        addResumeLogic(instrumentedLines, functionBodyIndent, varsToCapture)
+                        addResumeLogic(instrumentedLines, injectIndent, varsToCapture)
                         addedResumeLogic = true
                     }
                 }
@@ -1298,7 +1298,7 @@ def sentiment_analysis_worker(message_data):
                     
                     // Add resume logic if this is a resume execution
                     if (isResume && !addedResumeLogic) {
-                        addResumeLogic(instrumentedLines, functionBodyIndent, varsToCapture)
+                        addResumeLogic(instrumentedLines, injectIndent, varsToCapture)
                         addedResumeLogic = true
                     }
                 }
