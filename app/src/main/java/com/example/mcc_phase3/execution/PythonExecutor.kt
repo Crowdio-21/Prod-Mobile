@@ -1265,11 +1265,13 @@ def sentiment_analysis_worker(message_data):
                 // Past docstring - add import and resume logic if needed
                 if (!addedImport && passedDocstring && !line.isBlank()) {
                     functionBodyIndent = line.takeWhile { it == ' ' || it == '\t' }
+                    // Only default to "    " inside a function body; module-level code stays at column 0
+                    val injectIndent = functionBodyIndent
                     if (functionBodyIndent.isEmpty()) functionBodyIndent = "    "
                     
                     // Add import builtins before this line
                     if (!funcCode.contains("import builtins")) {
-                        instrumentedLines.add("${functionBodyIndent}import builtins  # Injected for checkpoint support")
+                        instrumentedLines.add("${injectIndent}import builtins  # Injected for checkpoint support")
                     }
                     addedImport = true
                     
@@ -1285,10 +1287,12 @@ def sentiment_analysis_worker(message_data):
                     !trimmed.startsWith("\"\"\"") && !trimmed.startsWith("'''")) {
                     passedDocstring = true  // No docstring case
                     functionBodyIndent = line.takeWhile { it == ' ' || it == '\t' }
+                    // Only default to "    " inside a function body; module-level code stays at column 0
+                    val injectIndent = functionBodyIndent
                     if (functionBodyIndent.isEmpty()) functionBodyIndent = "    "
                     
                     if (!funcCode.contains("import builtins")) {
-                        instrumentedLines.add("${functionBodyIndent}import builtins  # Injected for checkpoint support")
+                        instrumentedLines.add("${injectIndent}import builtins  # Injected for checkpoint support")
                     }
                     addedImport = true
                     
