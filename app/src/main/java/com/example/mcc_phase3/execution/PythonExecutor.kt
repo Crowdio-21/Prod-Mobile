@@ -1,15 +1,22 @@
 package com.example.mcc_phase3.execution
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import com.chaquo.python.Python
 import com.chaquo.python.PyObject
 import com.chaquo.python.android.AndroidPlatform
 import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.utils.EventLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import com.example.mcc_phase3.execution.ImagePickerManager
@@ -31,6 +38,7 @@ class PythonExecutor(private val context: Context) {
     
     private val isInitialized = AtomicBoolean(false)
     private val workerIdManager = WorkerIdManager.getInstance(context)
+    private val configManager = ConfigManager.getInstance(context)
     
     // Checkpoint handler reference for progress updates during execution
     private val checkpointHandlerRef = AtomicReference<CheckpointHandler?>(null)
@@ -176,6 +184,7 @@ print("[Android Worker] Checkpoint capture disabled")
      */
     suspend fun executeCode(serializedCode: String, serializedArgs: String? = null): Map<String, Any?> {
         return withContext(Dispatchers.IO) {
+            var previousWorkingDirectory: String? = null
             try {
                 if (!isInitialized.get()) {
                     val initialized = initialize()
@@ -209,12 +218,15 @@ print("[Android Worker] Checkpoint capture disabled")
                 Log.d(TAG, "Python code (first 100 chars): ${pythonCode.take(100)}...")
 
                 // Handle arguments - check if they're base64 encoded or plain text
+                var argsJsonRaw: String? = null
                 val args: PyObject? = if (serializedArgs != null && serializedArgs.isNotEmpty()) {
                     if (isBase64Encoded(serializedArgs)) {
                         val decodedArgs = decodeBase64(serializedArgs)
+                        argsJsonRaw = decodedArgs
                         jsonModule?.callAttr("loads", decodedArgs)
                     } else {
                         // Try to parse as JSON directly
+                        argsJsonRaw = serializedArgs
                         jsonModule?.callAttr("loads", serializedArgs)
                     }
                 } else {
@@ -229,15 +241,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 // Set up progress callback for real-time progress reporting
                 setupProgressCallback()
 
-                // If the function processes device images, prompt the user to select
-                // images from the gallery and inject their paths before execution.
-                if (requiresImageSelection(pythonCode)) {
-                    Log.d(TAG, "Image-processing function detected – launching image picker")
-                    val selectedPaths = ImagePickerManager.getInstance()
-                        .awaitImageSelection(context)
-                    injectSelectedImages(selectedPaths)
-                    Log.d(TAG, "Injected ${selectedPaths.size} image path(s) into builtins._selected_images")
-                }
+                previousWorkingDirectory = prepareImageInputsIfNeeded(pythonCode, argsJsonRaw)
 
                 // Execute the Python code using the desktop worker approach
                 val result = executeFunctionCode(pythonCode, args)
@@ -251,6 +255,9 @@ print("[Android Worker] Checkpoint capture disabled")
                 // Clean up injected image paths
                 cleanupSelectedImages()
 
+                // Restore previous working directory if it was changed
+                restoreWorkingDirectory(previousWorkingDirectory)
+
                 Log.d(TAG, "Python code executed successfully")
                 mapOf<String, Any?>(
                     "status" to "success",
@@ -261,6 +268,10 @@ print("[Android Worker] Checkpoint capture disabled")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to execute Python code", e)
+                cleanupCheckpointCallback()
+                cleanupProgressCallback()
+                cleanupSelectedImages()
+                restoreWorkingDirectory(previousWorkingDirectory)
                 EventLogger.error(EventLogger.Categories.PYTHON, "Python execution failed: ${e.message}")
                 // Encode the error as a JSON string so the backend always receives a parseable result
                 val errorJson = try {
@@ -299,6 +310,7 @@ print("[Android Worker] Checkpoint capture disabled")
         taskArgsJson: String
     ): Map<String, Any?> {
         return withContext(Dispatchers.IO) {
+            var previousWorkingDirectory: String? = null
             try {
                 if (!isInitialized.get()) {
                     val initialized = initialize()
@@ -336,6 +348,8 @@ print("[Android Worker] Checkpoint capture disabled")
                     Log.d(TAG, "⚠️ Detected Transformers library usage, replacing with mobile-compatible version")
                     pythonCode = getMobileCompatibleSentimentFunction()
                 }
+
+                previousWorkingDirectory = prepareImageInputsIfNeeded(pythonCode, taskArgsJson)
                 
                 // Execute with isResume=true to inject resume logic
                 val result = executeFunctionCode(pythonCode, taskArgs, isResume = true)
@@ -343,6 +357,8 @@ print("[Android Worker] Checkpoint capture disabled")
                 // Clean up
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
+                cleanupSelectedImages()
+                restoreWorkingDirectory(previousWorkingDirectory)
 
                 Log.d(TAG, "Resumed Python code executed successfully")
                 mapOf<String, Any?>(
@@ -357,6 +373,8 @@ print("[Android Worker] Checkpoint capture disabled")
                 Log.e(TAG, "Failed to execute resumed Python code", e)
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
+                cleanupSelectedImages()
+                restoreWorkingDirectory(previousWorkingDirectory)
                 mapOf<String, Any?>(
                     "status" to "error",
                     "message" to "Resumed execution failed: ${e.message ?: "Unknown error"}",
@@ -1577,6 +1595,415 @@ def sentiment_analysis_worker(message_data):
             v.contains("(") || v.contains("[") && !v.startsWith("[") -> false
             // Otherwise not a default
             else -> false
+        }
+    }
+
+    /**
+     * Extract optional working directory from task args JSON.
+     *
+     * Supports common field names:
+     * - working_directory
+     * - workingDirectory
+     * - directory_path
+     * - directoryPath
+     */
+    private fun extractWorkingDirectoryFromArgs(argsJson: String?): String? {
+        if (argsJson.isNullOrBlank()) return null
+
+        return try {
+            val trimmed = argsJson.trim()
+            when {
+                trimmed.startsWith("{") -> extractWorkingDirectoryFromObject(JSONObject(trimmed))
+                trimmed.startsWith("[") -> extractWorkingDirectoryFromArray(JSONArray(trimmed))
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not parse task args for working directory: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractWorkingDirectoryFromObject(obj: JSONObject): String? {
+        val candidateKeys = listOf("working_directory", "workingDirectory", "directory_path", "directoryPath")
+
+        for (key in candidateKeys) {
+            val value = obj.optString(key, "").trim()
+            if (value.isNotEmpty()) return value
+        }
+
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = obj.opt(key) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractWorkingDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractWorkingDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractWorkingDirectoryFromArray(arr: JSONArray): String? {
+        for (i in 0 until arr.length()) {
+            val value = arr.opt(i) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractWorkingDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractWorkingDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Resolve effective working directory for execution.
+     * Priority:
+     * 1) task args working directory fields
+     * 2) saved Preferences working directory
+     */
+    private fun resolveWorkingDirectory(argsJson: String?): String? {
+        val fromArgs = extractWorkingDirectoryFromArgs(argsJson)
+        if (!fromArgs.isNullOrBlank()) {
+            val normalized = normalizeWorkingDirectoryValue(fromArgs)
+            if (!normalized.isNullOrBlank()) return normalized
+        }
+
+        val fromPrefs = configManager.getWorkingDir()
+        if (!fromPrefs.isNullOrBlank()) {
+            val normalized = normalizeWorkingDirectoryValue(fromPrefs)
+            if (!normalized.isNullOrBlank()) return normalized
+        }
+
+        return null
+    }
+
+    /**
+     * Resolve raw working directory from args/preferences without path normalization.
+     * Preserves SAF `content://` URIs.
+     */
+    private fun resolveWorkingDirectoryRaw(argsJson: String?): String? {
+        val fromArgs = extractWorkingDirectoryFromArgs(argsJson)?.trim()
+        if (!fromArgs.isNullOrBlank()) return fromArgs
+
+        val fromPrefs = configManager.getWorkingDir().trim()
+        if (fromPrefs.isNotBlank()) return fromPrefs
+
+        return null
+    }
+
+    /**
+     * Normalize a directory value from task args or preferences.
+     * Supports plain filesystem paths and Android tree content URIs.
+     */
+    private fun normalizeWorkingDirectoryValue(rawValue: String): String? {
+        val trimmed = rawValue.trim()
+        if (trimmed.isEmpty()) return null
+
+        return if (trimmed.startsWith("content://")) {
+            resolveTreeUriToFilePath(trimmed)
+        } else {
+            trimmed
+        }
+    }
+
+    /**
+     * Convert Android Storage Access Framework tree URI to a filesystem path.
+     * Example:
+     * content://.../tree/primary:Download -> /storage/emulated/0/Download
+     */
+    private fun resolveTreeUriToFilePath(uriString: String): String? {
+        return try {
+            val uri = Uri.parse(uriString)
+            val treeDocId = uri.lastPathSegment?.substringAfter("tree/") ?: return null
+            val decodedDocId = Uri.decode(treeDocId)
+
+            when {
+                decodedDocId.startsWith("primary:") -> {
+                    val relative = decodedDocId.removePrefix("primary:")
+                    if (relative.isBlank()) "/storage/emulated/0" else "/storage/emulated/0/$relative"
+                }
+                decodedDocId.contains(":") -> {
+                    val type = decodedDocId.substringBefore(":")
+                    val relative = decodedDocId.substringAfter(":")
+                    if (type.isBlank() || relative.isBlank()) null else "/storage/$type/$relative"
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Failed to resolve tree URI to path: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Set Python process working directory for task execution.
+     * Returns the previous working directory when successful, null otherwise.
+     */
+    private fun setupWorkingDirectory(workingDirectory: String): String? {
+        return try {
+            val dir = File(workingDirectory)
+            if (!dir.exists() || !dir.isDirectory) {
+                Log.w(TAG, "Working directory is invalid: $workingDirectory")
+                return null
+            }
+
+            val osModule = pythonInstance?.getModule("os") ?: return null
+            val previousDir = osModule.callAttr("getcwd")?.toString()
+            osModule.callAttr("chdir", dir.absolutePath)
+            builtinsModule?.put("_task_working_directory", dir.absolutePath)
+            Log.d(TAG, "Python working directory set to: ${dir.absolutePath}")
+            previousDir
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set working directory: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Restore Python process working directory after task execution.
+     */
+    private fun restoreWorkingDirectory(previousDirectory: String?) {
+        if (previousDirectory.isNullOrBlank()) return
+
+        try {
+            val osModule = pythonInstance?.getModule("os") ?: return
+            osModule.callAttr("chdir", previousDirectory)
+
+            val hasAttr = builtinsModule?.callAttr("hasattr", builtinsModule, "_task_working_directory")
+                ?.toJava(Boolean::class.java) == true
+            if (hasAttr) {
+                builtinsModule?.callAttr("delattr", builtinsModule, "_task_working_directory")
+            }
+
+            Log.d(TAG, "Python working directory restored to: $previousDirectory")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore working directory: ${e.message}")
+        }
+    }
+
+    /**
+     * Ensure image tasks always get an input source.
+     *
+     * Strategy:
+     * 1) If task args already include image input fields, do nothing.
+     * 2) Try effective working directory (task args or preferences): set cwd and inject images found there.
+     * 3) If still no images, launch picker and inject selected images.
+     *
+     * @return previous working directory when cwd was changed, else null.
+     */
+    private suspend fun prepareImageInputsIfNeeded(code: String, argsJson: String?): String? {
+        if (!isImageTask(code, argsJson)) return null
+
+        if (hasImageInputsInArgs(argsJson)) {
+            Log.d(TAG, "Image task already has image inputs in task args; skipping picker/injection")
+            return null
+        }
+
+        val workingDirectoryRaw = resolveWorkingDirectoryRaw(argsJson)
+        if (!workingDirectoryRaw.isNullOrBlank()) {
+            if (workingDirectoryRaw.startsWith("content://")) {
+                val imagePaths = collectImagePathsFromTreeUri(workingDirectoryRaw)
+                if (imagePaths.isNotEmpty()) {
+                    injectSelectedImages(imagePaths)
+                    Log.d(TAG, "Injected ${imagePaths.size} image path(s) from selected SAF folder")
+                    return null
+                }
+                Log.w(TAG, "No image files found in selected SAF folder – falling back to picker")
+            } else {
+                val workingDirectory = normalizeWorkingDirectoryValue(workingDirectoryRaw)
+                if (!workingDirectory.isNullOrBlank()) {
+                    val previousDir = setupWorkingDirectory(workingDirectory)
+                    if (previousDir != null) {
+                        val imagePaths = collectImagePathsFromDirectory(workingDirectory)
+                        if (imagePaths.isNotEmpty()) {
+                            injectSelectedImages(imagePaths)
+                            Log.d(TAG, "Injected ${imagePaths.size} image path(s) from working directory: $workingDirectory")
+                            return previousDir
+                        }
+                        Log.w(TAG, "No image files found in working directory '$workingDirectory' – falling back to picker")
+                        return previousDir.also {
+                            val selectedPaths = ImagePickerManager.getInstance().awaitImageSelection(context)
+                            injectSelectedImages(selectedPaths)
+                            Log.d(TAG, "Injected ${selectedPaths.size} image path(s) from picker")
+                        }
+                    }
+                    Log.w(TAG, "Could not use working directory '$workingDirectory' – falling back to picker")
+                }
+            }
+        } else {
+            Log.d(TAG, "Image task has no working directory (task args or preferences) – launching image picker")
+        }
+
+        val selectedPaths = ImagePickerManager.getInstance().awaitImageSelection(context)
+        injectSelectedImages(selectedPaths)
+        Log.d(TAG, "Injected ${selectedPaths.size} image path(s) from picker")
+        return null
+    }
+
+    /** True if the code/args indicate image processing work. */
+    private fun isImageTask(code: String, argsJson: String?): Boolean {
+        if (requiresImageSelection(code)) return true
+
+        val lowerCode = code.lowercase()
+        if (lowerCode.contains("image_dir") ||
+            lowerCode.contains("image_path") ||
+            lowerCode.contains("image_paths") ||
+            lowerCode.contains("cv2") ||
+            lowerCode.contains("imread(") ||
+            lowerCode.contains("from pil import") ||
+            lowerCode.contains("import pillow") ||
+            lowerCode.contains("_selected_images")) {
+            return true
+        }
+
+        val lowerArgs = argsJson?.lowercase() ?: ""
+        return lowerArgs.contains("image_dir") ||
+               lowerArgs.contains("image_path") ||
+               lowerArgs.contains("image_paths") ||
+               lowerArgs.contains("images")
+    }
+
+    /** True when task args already provide image input fields. */
+    private fun hasImageInputsInArgs(argsJson: String?): Boolean {
+        if (argsJson.isNullOrBlank()) return false
+        return try {
+            val trimmed = argsJson.trim()
+            when {
+                trimmed.startsWith("{") -> objectHasImageInputs(JSONObject(trimmed))
+                trimmed.startsWith("[") -> arrayHasImageInputs(JSONArray(trimmed))
+                else -> false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun objectHasImageInputs(obj: JSONObject): Boolean {
+        val imageKeys = listOf("image_dir", "image_path", "image_paths", "images")
+        for (key in imageKeys) {
+            if (!obj.isNull(key)) {
+                val raw = obj.opt(key)
+                when (raw) {
+                    is String -> if (raw.isNotBlank()) return true
+                    is JSONArray -> if (raw.length() > 0) return true
+                    else -> if (raw != null) return true
+                }
+            }
+        }
+
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            when (val value = obj.opt(keys.next())) {
+                is JSONObject -> if (objectHasImageInputs(value)) return true
+                is JSONArray -> if (arrayHasImageInputs(value)) return true
+            }
+        }
+        return false
+    }
+
+    private fun arrayHasImageInputs(arr: JSONArray): Boolean {
+        for (i in 0 until arr.length()) {
+            when (val value = arr.opt(i)) {
+                is JSONObject -> if (objectHasImageInputs(value)) return true
+                is JSONArray -> if (arrayHasImageInputs(value)) return true
+            }
+        }
+        return false
+    }
+
+    /** Collect image files from a directory recursively for auto-injection. */
+    private fun collectImagePathsFromDirectory(directoryPath: String): List<String> {
+        return try {
+            val dir = File(directoryPath)
+            if (!dir.exists() || !dir.isDirectory) return emptyList()
+
+            val validExt = setOf("jpg", "jpeg", "png", "bmp", "gif", "webp")
+            dir.walkTopDown()
+                .filter { it.isFile }
+                .filter { file ->
+                    val ext = file.extension.lowercase()
+                    validExt.contains(ext)
+                }
+                .map { it.absolutePath }
+                .toList()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to collect images from working directory '$directoryPath': ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Collect image files from an Android SAF tree URI by copying them to app cache.
+     * Returns local absolute paths readable by Python libraries.
+     */
+    private fun collectImagePathsFromTreeUri(treeUriString: String): List<String> {
+        return try {
+            val treeUri = Uri.parse(treeUriString)
+            val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
+            if (!root.exists() || !root.isDirectory) return emptyList()
+
+            val cacheRoot = File(context.cacheDir, "task_images").apply { mkdirs() }
+            val runDir = File(cacheRoot, "run_${System.currentTimeMillis()}").apply { mkdirs() }
+
+            val imagePaths = mutableListOf<String>()
+            val queue = ArrayDeque<DocumentFile>()
+            queue.add(root)
+
+            while (queue.isNotEmpty()) {
+                val current = queue.removeFirst()
+                current.listFiles().forEach { child ->
+                    when {
+                        child.isDirectory -> queue.add(child)
+                        child.isFile && isImageDocument(child) -> {
+                            val copiedPath = copyDocumentToCache(child, runDir)
+                            if (!copiedPath.isNullOrBlank()) imagePaths.add(copiedPath)
+                        }
+                    }
+                }
+            }
+
+            imagePaths
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to collect images from SAF folder: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun isImageDocument(file: DocumentFile): Boolean {
+        val name = (file.name ?: "").lowercase()
+        val mime = (file.type ?: "").lowercase()
+        if (mime.startsWith("image/")) return true
+        return name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") ||
+                name.endsWith(".bmp") || name.endsWith(".gif") || name.endsWith(".webp")
+    }
+
+    private fun copyDocumentToCache(doc: DocumentFile, outputDir: File): String? {
+        return try {
+            val sourceName = doc.name ?: "image_${System.nanoTime()}.bin"
+            val safeName = sourceName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val outFile = File(outputDir, safeName)
+
+            context.contentResolver.openInputStream(doc.uri)?.use { input ->
+                FileOutputStream(outFile).use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return null
+
+            outFile.absolutePath
+        } catch (e: Exception) {
+            Log.d(TAG, "Failed to copy SAF file to cache: ${e.message}")
+            null
         }
     }
     
