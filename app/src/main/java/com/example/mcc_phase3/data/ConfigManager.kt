@@ -18,6 +18,7 @@ class ConfigManager private constructor(context: Context) {
         private const val KEY_FOREMAN_PORT = "foreman_port"
         private const val KEY_WEBSOCKET_PORT = "websocket_port"
         private const val KEY_STATISTICS_PORT = "statistics_port"
+        private const val KEY_WORKING_DIR = "working_dir"
         
         // Default values - MUST be configured by user in Settings
         // Empty string forces user to configure their own Foreman IP
@@ -185,6 +186,21 @@ class ConfigManager private constructor(context: Context) {
         prefs.edit().clear().apply()
     }
     
+    /**
+     * Get the stored working directory URI string for code execution
+     */
+    fun getWorkingDir(): String {
+        return prefs.getString(KEY_WORKING_DIR, "") ?: ""
+    }
+
+    /**
+     * Set the working directory URI string for code execution
+     */
+    fun setWorkingDir(uriString: String) {
+        Log.d(TAG, "Setting working directory to: $uriString")
+        prefs.edit().putString(KEY_WORKING_DIR, uriString).apply()
+    }
+
     /**
      * Get configuration summary for logging
      */
