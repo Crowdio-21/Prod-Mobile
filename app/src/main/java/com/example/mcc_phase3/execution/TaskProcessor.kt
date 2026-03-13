@@ -13,6 +13,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -32,6 +33,10 @@ class TaskProcessor(private val context: Context) {
 
         /** Maximum wall-clock time (ms) a single task may run before it is force-cancelled. */
         private const val TASK_TIMEOUT_MS = 10 * 60 * 1000L  // 10 minutes
+        private const val MAX_TRANSIENT_RETRIES = 1
+        // Base64 expands binary by ~33%. A common 1x224x224x64 float32 tensor can be ~17MB in base64.
+        // Keep a guard, but set it high enough to allow valid partition outputs.
+        private const val MAX_OUTPUT_TENSOR_B64_CHARS = 24 * 1024 * 1024
 
         // Task types
         private const val TASK_TYPE_ASSIGN = "assign_task"
@@ -75,12 +80,18 @@ class TaskProcessor(private val context: Context) {
 
     // Work type detected from incoming func_code
     private val currentWorkType = AtomicReference<String>("Other")
+    private val completedPartitionIdxByJob = ConcurrentHashMap<String, Int>()
 
     // --------------- Task queue for DNN parallel branches ---------------
     // When a task arrives while the worker is busy, it is queued here and
     // drained sequentially so no task is ever rejected.
     private data class QueuedTask(val data: JSONObject, val jobId: String?, val result: CompletableDeferred<String>)
     private val taskQueue = Channel<QueuedTask>(Channel.UNLIMITED)
+
+    private data class StageInfo(
+        val stageName: String,
+        val partitionIdx: Int? = null
+    )
 
     init {
         // Single consumer coroutine — processes queued tasks one at a time
@@ -205,6 +216,13 @@ class TaskProcessor(private val context: Context) {
             // Extract function code and task arguments (matching desktop worker format)
             val funcCode = data?.optString("func_code", "") ?: ""
             val taskArgs = data?.optString("task_args", "") ?: ""
+            val stageInfo = inspectStage(funcCode, taskArgs)
+            val routePolicy = routePolicyForStage(stageInfo)
+            Log.i(TAG, "Stage detected: ${stageInfo.stageName} partition=${stageInfo.partitionIdx} route=$routePolicy")
+
+            if (stageInfo.stageName == "partition_model") {
+                Log.w(TAG, "partition_model should run on desktop TensorFlow worker; Android execution will use fallback behavior")
+            }
             
             // Parse task_metadata if present (declarative checkpointing configuration)
             val taskMetadataJson = data?.optJSONObject("task_metadata")
@@ -219,6 +237,17 @@ class TaskProcessor(private val context: Context) {
             if (funcCode.isEmpty()) {
                 return createErrorResponse("No function code found in task")
             }
+
+            if (!isStageOrderSatisfied(jobId, stageInfo)) {
+                val expected = ((completedPartitionIdxByJob[jobId] ?: -1) + 1)
+                return MessageProtocol.createTaskErrorMessage(
+                    taskId = taskId,
+                    jobId = jobId,
+                    error = "Stage order violation: ${stageInfo.stageName} partition=${stageInfo.partitionIdx}, expected partition=$expected"
+                )
+            }
+
+            val normalizedTaskArgs = normalizeTaskArgsForStage(taskArgs, stageInfo)
             
             // Detect and store work type before execution starts
             currentWorkType.set(detectWorkType(funcCode))
@@ -298,7 +327,7 @@ class TaskProcessor(private val context: Context) {
                 }
                 
                 // Execute the function code (matching desktop worker format)
-                val executionResult = pythonExecutor.executeCode(funcCode, taskArgs)
+                val executionResult = executeCodeWithRetry(funcCode, normalizedTaskArgs, stageInfo)
 
                 val executionStatus = executionResult["status"] as? String ?: "error"
                 val executionMessage = executionResult["message"] as? String ?: "Unknown error"
@@ -315,10 +344,22 @@ class TaskProcessor(private val context: Context) {
                 } else {
                     // Ensure result is never null — fall back to empty JSON object
                     val rawResult = executionResult["result"]
-                    val safeResult: Any = when {
-                        rawResult == null -> "{}"
-                        rawResult is String && rawResult.isBlank() -> "{}"
-                        else -> rawResult
+                    val normalized = normalizeAndValidateResult(rawResult, stageInfo)
+                    if (normalized.optString("status") == "error") {
+                        return MessageProtocol.createTaskErrorMessage(
+                            taskId = taskId,
+                            jobId = jobId,
+                            error = normalized.optString("error", "Malformed task result")
+                        )
+                    }
+
+                    val safeResult: Any = normalized.optString("result", "{}")
+
+                    if (jobId != null && stageInfo.stageName == "tflite_partition" && stageInfo.partitionIdx != null) {
+                        completedPartitionIdxByJob[jobId] = maxOf(
+                            completedPartitionIdxByJob[jobId] ?: -1,
+                            stageInfo.partitionIdx
+                        )
                     }
                     MessageProtocol.createTaskResultMessage(
                         taskId = taskId,
@@ -374,6 +415,234 @@ class TaskProcessor(private val context: Context) {
                 jobId = jobId,
                 error = "Task execution failed: ${e.message ?: "Unknown error"}"
             )
+        }
+    }
+
+    private suspend fun executeCodeWithRetry(
+        funcCode: String,
+        taskArgs: String,
+        stageInfo: StageInfo
+    ): Map<String, Any?> {
+        var attempt = 0
+        var last: Map<String, Any?> = emptyMap()
+
+        while (attempt <= MAX_TRANSIENT_RETRIES) {
+            val result = pythonExecutor.executeCode(funcCode, taskArgs)
+            last = result
+
+            val status = result["status"] as? String ?: "error"
+            if (status != "error") return result
+
+            val message = result["message"] as? String ?: ""
+            val transient = isTransientFailure(message)
+            if (!transient || attempt == MAX_TRANSIENT_RETRIES) {
+                return result
+            }
+
+            attempt += 1
+            Log.w(TAG, "Retrying stage ${stageInfo.stageName} partition=${stageInfo.partitionIdx}; attempt=$attempt reason=$message")
+            delay(300)
+        }
+
+        return last
+    }
+
+    private fun isTransientFailure(message: String): Boolean {
+        val msg = message.lowercase()
+        return msg.contains("no_tflite_backend") ||
+            msg.contains("decode") ||
+            msg.contains("base64") ||
+            msg.contains("temporarily unavailable")
+    }
+
+    private fun inspectStage(funcCode: String, taskArgs: String): StageInfo {
+        val code = funcCode.lowercase()
+        return when {
+            code.contains("def partition_model(") -> StageInfo("partition_model", null)
+            code.contains("def run_tflite_partition(") -> StageInfo("tflite_partition", extractPartitionIdx(taskArgs))
+            code.contains("def classify(") -> StageInfo("classify", null)
+            else -> StageInfo("generic", null)
+        }
+    }
+
+    private fun routePolicyForStage(stageInfo: StageInfo): String {
+        return when (stageInfo.stageName) {
+            "partition_model" -> "desktop_tensorflow_pool"
+            "tflite_partition" -> "android_tflite_pool"
+            "classify" -> "android_or_desktop"
+            else -> "default_worker_pool"
+        }
+    }
+
+    private fun isStageOrderSatisfied(jobId: String?, stageInfo: StageInfo): Boolean {
+        if (jobId.isNullOrBlank()) return true
+        if (stageInfo.stageName != "tflite_partition") return true
+
+        val idx = stageInfo.partitionIdx ?: return true
+        if (idx == 0) {
+            completedPartitionIdxByJob[jobId] = -1
+            return true
+        }
+
+        val lastCompleted = completedPartitionIdxByJob[jobId] ?: -1
+        return lastCompleted >= idx - 1
+    }
+
+    private fun extractPartitionIdx(taskArgs: String): Int? {
+        if (taskArgs.isBlank()) return null
+        return try {
+            val trimmed = taskArgs.trim()
+            val obj = when {
+                trimmed.startsWith("[") -> {
+                    val arr = JSONArray(trimmed)
+                    if (arr.length() > 0 && arr.optJSONObject(0) != null) arr.getJSONObject(0) else null
+                }
+                trimmed.startsWith("{") -> JSONObject(trimmed)
+                else -> null
+            } ?: return null
+
+            val originalArgs = obj.optJSONObject("original_args")
+            when {
+                originalArgs != null && originalArgs.has("partition_idx") -> originalArgs.optInt("partition_idx")
+                obj.has("partition_idx") -> obj.optInt("partition_idx")
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun normalizeTaskArgsForStage(taskArgs: String, stageInfo: StageInfo): String {
+        return when (stageInfo.stageName) {
+            "tflite_partition" -> normalizeTflitePartitionArgs(taskArgs, stageInfo.partitionIdx)
+            "classify" -> normalizeClassifyArgs(taskArgs)
+            else -> taskArgs
+        }
+    }
+
+    private fun normalizeTflitePartitionArgs(taskArgs: String, partitionIdx: Int?): String {
+        val idx = partitionIdx ?: return taskArgs
+
+        return try {
+            val rootArray = if (taskArgs.trim().startsWith("[")) {
+                JSONArray(taskArgs)
+            } else {
+                JSONArray().apply {
+                    if (taskArgs.trim().startsWith("{")) put(JSONObject(taskArgs))
+                }
+            }
+
+            val first = if (rootArray.length() > 0 && rootArray.optJSONObject(0) != null) {
+                rootArray.getJSONObject(0)
+            } else {
+                JSONObject().also { rootArray.put(it) }
+            }
+
+            val originalArgs = first.optJSONObject("original_args") ?: JSONObject().also {
+                first.put("original_args", it)
+            }
+            if (!originalArgs.has("partition_idx")) {
+                originalArgs.put("partition_idx", idx)
+            }
+            if (!first.has("upstream_results")) {
+                first.put("upstream_results", JSONObject())
+            }
+            rootArray.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to normalize task_args for tflite_partition: ${e.message}")
+            taskArgs
+        }
+    }
+
+    private fun normalizeClassifyArgs(taskArgs: String): String {
+        return try {
+            val rootArray = if (taskArgs.trim().startsWith("[")) {
+                JSONArray(taskArgs)
+            } else {
+                JSONArray().apply {
+                    if (taskArgs.trim().startsWith("{")) put(JSONObject(taskArgs))
+                }
+            }
+
+            if (rootArray.length() == 0 || rootArray.optJSONObject(0) == null) {
+                return taskArgs
+            }
+
+            val first = rootArray.getJSONObject(0)
+            val originalArgs = first.optJSONObject("original_args") ?: JSONObject().also {
+                first.put("original_args", it)
+            }
+            val upstreamResults = first.optJSONObject("upstream_results") ?: return rootArray.toString()
+
+            if (upstreamResults.length() == 1) {
+                val upstreamKey = upstreamResults.keys().asSequence().firstOrNull()
+                val upstreamObj = upstreamKey?.let { upstreamResults.optJSONObject(it) }
+
+                if (upstreamObj != null) {
+                    val upstreamStreamId = if (upstreamObj.has("stream_id")) upstreamObj.optInt("stream_id") else null
+                    if (upstreamStreamId != null) {
+                        val currentStreamId = if (originalArgs.has("stream_id")) originalArgs.optInt("stream_id") else null
+                        if (currentStreamId == null || currentStreamId != upstreamStreamId) {
+                            originalArgs.put("stream_id", upstreamStreamId)
+                            Log.i(TAG, "Normalized classify stream_id to upstream stream_id=$upstreamStreamId")
+                        }
+                    }
+
+                    // Some classify payloads look for feature_map directly.
+                    // Provide alias from upstream output_tensor when available.
+                    if (!first.has("feature_map") && upstreamObj.optJSONObject("output_tensor") != null) {
+                        first.put("feature_map", upstreamObj.optJSONObject("output_tensor"))
+                    }
+                }
+            }
+
+            rootArray.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to normalize task_args for classify: ${e.message}")
+            taskArgs
+        }
+    }
+
+    private fun normalizeAndValidateResult(rawResult: Any?, stageInfo: StageInfo): JSONObject {
+        return try {
+            val resultObj = when (rawResult) {
+                null -> JSONObject()
+                is JSONObject -> rawResult
+                is String -> {
+                    val t = rawResult.trim()
+                    if (t.startsWith("{")) JSONObject(t) else JSONObject().put("result", rawResult)
+                }
+                else -> JSONObject().put("result", rawResult.toString())
+            }
+
+            if (resultObj.has("error")) {
+                return JSONObject().put("status", "error").put("error", resultObj.optString("error", "Task returned error"))
+            }
+
+            if (stageInfo.stageName == "tflite_partition") {
+                // The stage-0 payload already carries model blobs; passing tflite_models through
+                // every partition result can exceed backend/WebSocket limits and block next stages.
+                if (resultObj.has("tflite_models")) {
+                    resultObj.remove("tflite_models")
+                }
+
+                if (!resultObj.has("partition_idx")) {
+                    stageInfo.partitionIdx?.let { resultObj.put("partition_idx", it) }
+                }
+                if (!resultObj.has("partition_idx") || !resultObj.has("output_tensor")) {
+                    return JSONObject().put("status", "error").put("error", "Malformed tflite_partition result: requires partition_idx and output_tensor")
+                }
+
+                val tensorObj = resultObj.optJSONObject("output_tensor")
+                val dataB64 = tensorObj?.optString("data_b64", "") ?: ""
+                if (dataB64.isNotEmpty() && dataB64.length > MAX_OUTPUT_TENSOR_B64_CHARS) {
+                    return JSONObject().put("status", "error").put("error", "Tensor payload too large (${dataB64.length} chars)")
+                }
+            }
+
+            JSONObject().put("status", "ok").put("result", resultObj.toString())
+        } catch (e: Exception) {
+            JSONObject().put("status", "error").put("error", "Failed to normalize result: ${e.message}")
         }
     }
     

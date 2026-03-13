@@ -37,13 +37,32 @@ def _serialize_tensor(arr):
 
 def _deserialize_tensor(obj):
     """Reconstruct a NumPy array from the dict produced by _serialize_tensor."""
+    import io
     import gzip
-    raw_b64 = base64.b64decode(obj["data"])
+    if not isinstance(obj, dict):
+        return np.asarray(obj)
+
+    # Support both schemas used in this pipeline:
+    # 1) {format: 'npy', data_b64: ...}
+    # 2) {data: ..., dtype: ..., shape: ..., compressed: ...}
+    if obj.get("format") == "npy" and obj.get("data_b64"):
+        raw = base64.b64decode(obj["data_b64"])
+        return np.load(io.BytesIO(raw))
+
+    data_blob = obj.get("data", obj.get("data_b64"))
+    if data_blob is None:
+        raise KeyError("data")
+
+    raw_b64 = base64.b64decode(data_blob)
     if obj.get("compressed", False):
         raw = gzip.decompress(raw_b64)
     else:
         raw = raw_b64
-    return np.frombuffer(raw, dtype=np.dtype(obj["dtype"])).reshape(obj["shape"])
+
+    dtype = np.dtype(obj.get("dtype", "float32"))
+    shape = obj.get("shape")
+    arr = np.frombuffer(raw, dtype=dtype)
+    return arr.reshape(shape) if shape else arr
 
 
 def build_resnet_dag(*args, **kwargs):
@@ -141,6 +160,12 @@ def build_resnet_dag(*args, **kwargs):
 
 def init_model(model_path: str, layer_configs: list):
     """Called once from Kotlin on startup. Pre-slice the model."""
+    if not model_path:
+        return
+
+    if _sub_models.get("interpreter") is not None:
+        return
+
     try:
         import tensorflow.lite as tflite
         interpreter = tflite.Interpreter(model_path=model_path)
@@ -148,12 +173,20 @@ def init_model(model_path: str, layer_configs: list):
         _sub_models["interpreter"] = interpreter
     except ImportError:
         pass  # fallback to Keras or simulation
+    except Exception:
+        # Keep fallback behavior if model cannot be loaded on this device.
+        print(f"Error loading model from {model_path}, falling back to simulation.")
+        pass
 
 def run_layer(layer_id: str, input_np, params: dict) -> np.ndarray:
     """Execute one layer slice. Returns output activation as ndarray."""
     input_arr = np.asarray(input_np, dtype=np.float32)
 
     interpreter = _sub_models.get("interpreter")
+    if interpreter is None and isinstance(params, dict):
+        init_model(params.get("model_path", ""), params.get("layer_configs", []))
+        interpreter = _sub_models.get("interpreter")
+
     if interpreter:
         # TFLite path
         input_details = interpreter.get_input_details()

@@ -10,6 +10,10 @@ import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.utils.EventLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import com.example.mcc_phase3.execution.ImagePickerManager
@@ -225,7 +229,7 @@ print("[Android Worker] Checkpoint capture disabled")
                     null
                 }
 
-                Log.d(TAG, "Decoded arguments: $args")
+                Log.d(TAG, "Decoded arguments: ${summarizeForLog(args)}")
                 
                 // Set up checkpoint callback in Python builtins if handler is available
                 setupCheckpointCallback()
@@ -317,7 +321,7 @@ print("[Android Worker] Checkpoint capture disabled")
 
                 Log.d(TAG, "Executing Python code with restored state...")
                 Log.d(TAG, "Checkpoint state (first 200 chars): ${checkpointStateJson.take(200)}...")
-                Log.d(TAG, "Task args: $taskArgsJson")
+                        Log.d(TAG, "Task args: ${summarizeForLog(taskArgsJson)}")
 
                 // Set up checkpoint state in Python builtins._checkpoint_state with _is_resumed flag
                 // This is separate from task_args - it's only for the Python code to detect resumption
@@ -1717,7 +1721,7 @@ def sentiment_analysis_worker(message_data):
             // Convert taskArgs to Java list for processing with proper error handling
             val argsList = convertPyObjectToList(taskArgs)
             
-            Log.d(TAG, "Task args: $argsList")
+            Log.d(TAG, "Task args: ${summarizeForLog(argsList)}")
             
             // Execute the function with the provided arguments (matching desktop worker logic)
             val result = executeFunctionWithArgs(func, argsList)
@@ -1730,7 +1734,7 @@ def sentiment_analysis_worker(message_data):
             Log.d(TAG, "Task completed successfully")
             
             // result is already a Java object from executeFunctionWithArgs
-            Log.d(TAG, "Function result: $result")
+            Log.d(TAG, "Function result: ${summarizeForLog(result)}")
             result
             
         } catch (e: Exception) {
@@ -1749,22 +1753,24 @@ def sentiment_analysis_worker(message_data):
      */
     private fun executeFunctionWithArgs(func: PyObject, argsList: List<*>?): Any? {
         return try {
+            val normalizedArgsList = normalizeArgsListForTensorSchemas(argsList)
+
             val pyResult = when {
-                argsList == null || argsList.isEmpty() -> {
+                normalizedArgsList == null || normalizedArgsList.isEmpty() -> {
                     // No arguments
                     Log.d(TAG, "Calling function with no arguments")
                     func.call()
                 }
-                argsList.size == 1 -> {
+                normalizedArgsList.size == 1 -> {
                     // Single argument
-                    Log.d(TAG, "Calling function with single argument: ${argsList[0]}")
-                    func.call(argsList[0])
+                    Log.d(TAG, "Calling function with single argument: ${summarizeForLog(normalizedArgsList[0])}")
+                    func.call(normalizedArgsList[0])
                 }
-                argsList.size == 2 && argsList[1] is Map<*, *> -> {
+                normalizedArgsList.size == 2 && normalizedArgsList[1] is Map<*, *> -> {
                     // Function with args and kwargs
                     Log.d(TAG, "Calling function with args and kwargs")
-                    val args = argsList[0] as? List<*>
-                    val kwargs = argsList[1] as? Map<*, *>
+                    val args = normalizedArgsList[0] as? List<*>
+                    val kwargs = normalizedArgsList[1] as? Map<*, *>
                     if (args != null && kwargs != null) {
                         // Convert kwargs to Python dict and call with *args, **kwargs
                         val kwargsDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
@@ -1774,13 +1780,13 @@ def sentiment_analysis_worker(message_data):
                         func.call(*args.toTypedArray(), kwargsDict)
                     } else {
                         Log.w(TAG, "Failed to parse args/kwargs, calling with all arguments")
-                        func.call(*argsList.toTypedArray())
+                        func.call(*normalizedArgsList.toTypedArray())
                     }
                 }
                 else -> {
                     // Multiple arguments
-                    Log.d(TAG, "Calling function with ${argsList.size} arguments")
-                    func.call(*argsList.toTypedArray())
+                    Log.d(TAG, "Calling function with ${normalizedArgsList.size} arguments")
+                    func.call(*normalizedArgsList.toTypedArray())
                 }
             }
             
@@ -1806,7 +1812,12 @@ def sentiment_analysis_worker(message_data):
             if (isDict) {
                 // Convert dict to JSON string using Python's json module
                 val jsonStr = jsonModule?.callAttr("dumps", pyResult)?.toString()
-                Log.d(TAG, "Converted dict result to JSON: $jsonStr")
+                val preview = if ((jsonStr?.length ?: 0) > 400) {
+                    jsonStr!!.take(400) + "... (truncated)"
+                } else {
+                    jsonStr
+                }
+                Log.d(TAG, "Converted dict result to JSON: $preview")
                 return jsonStr ?: "{}"
             }
             
@@ -1840,7 +1851,61 @@ def sentiment_analysis_worker(message_data):
                 e.message?.contains("NameError") == true -> "Name error - function or variable not found"
                 else -> "Unknown error in function execution"
             }
-            throw Exception("$errorDetails: ${e.message}")
+            val rawMessage = e.message ?: "Unknown Python error"
+            val safeMessage = if (rawMessage.length > 600) {
+                rawMessage.take(600) + "... (truncated)"
+            } else {
+                rawMessage
+            }
+            throw Exception("$errorDetails: $safeMessage")
+        }
+    }
+
+    /**
+     * Foreman payloads may use either `data` or `data_b64` for tensor blobs.
+     * Normalize recursively so dynamic Python can access either key safely.
+     */
+    private fun normalizeArgsListForTensorSchemas(argsList: List<*>?): List<*>? {
+        if (argsList == null) return null
+        val seen = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
+        return argsList.map { normalizeTensorSchemaValue(it, seen, 0) }
+    }
+
+    private fun normalizeTensorSchemaValue(
+        value: Any?,
+        seen: MutableSet<Any>,
+        depth: Int
+    ): Any? {
+        // Avoid deep/cyclic graph traversal from Chaquopy proxy objects.
+        if (depth > 12) return value
+        if (value == null) return null
+        if (value is PyObject) return value
+
+        return when (value) {
+            is Map<*, *> -> {
+                if (!seen.add(value)) return value
+                val normalized = linkedMapOf<String, Any?>()
+                value.forEach { (k, v) ->
+                    normalized[k?.toString() ?: ""] = normalizeTensorSchemaValue(v, seen, depth + 1)
+                }
+
+                val hasData = normalized.containsKey("data")
+                val hasDataB64 = normalized.containsKey("data_b64")
+
+                if (hasDataB64 && !hasData) {
+                    normalized["data"] = normalized["data_b64"]
+                }
+                if (hasData && !hasDataB64) {
+                    normalized["data_b64"] = normalized["data"]
+                }
+
+                normalized
+            }
+            is List<*> -> {
+                if (!seen.add(value)) return value
+                value.map { normalizeTensorSchemaValue(it, seen, depth + 1) }
+            }
+            else -> value
         }
     }
     
@@ -1854,7 +1919,7 @@ def sentiment_analysis_worker(message_data):
                 return emptyList<Any>()
             }
             
-            Log.d(TAG, "Converting PyObject to Java List: $taskArgs")
+            Log.d(TAG, "Converting PyObject to Java List: <PyObject>")
 
             // If the incoming object is a dict, convert it to a Java Map so values aren't dropped.
             try {
@@ -1874,7 +1939,7 @@ def sentiment_analysis_worker(message_data):
             try {
                 val directConversion = taskArgs.asList()
                 if (directConversion != null) {
-                    Log.d(TAG, "Direct conversion successful: $directConversion")
+                    Log.d(TAG, "Direct conversion successful: ${summarizeForLog(directConversion)}")
                     return directConversion
                 }
             } catch (e: Exception) {
@@ -1886,7 +1951,7 @@ def sentiment_analysis_worker(message_data):
                 val pythonList = builtinsModule?.callAttr("list", taskArgs)
                 if (pythonList != null) {
                     val javaList = pythonList.asList()
-                    Log.d(TAG, "Alternative conversion successful: $javaList")
+                    Log.d(TAG, "Alternative conversion successful: ${summarizeForLog(javaList)}")
                     return javaList
                 }
             } catch (e: Exception) {
@@ -1910,7 +1975,7 @@ def sentiment_analysis_worker(message_data):
                     }
                 }
                 
-                Log.d(TAG, "Manual conversion successful: $resultList")
+                Log.d(TAG, "Manual conversion successful: ${summarizeForLog(resultList)}")
                 return resultList
                 
             } catch (e: Exception) {
@@ -1925,6 +1990,44 @@ def sentiment_analysis_worker(message_data):
             Log.e(TAG, "Failed to convert PyObject to List: ${e.message}")
             // Return empty list as fallback
             emptyList<Any>()
+        }
+    }
+
+    /**
+     * Avoid OOM from logging huge tensors/collections by logging compact summaries.
+     */
+    private fun summarizeForLog(value: Any?, maxChars: Int = 240): String {
+        return try {
+            when (value) {
+                null -> "null"
+                is String -> {
+                    if (value.length > maxChars) {
+                        "String(len=${value.length}, preview=${value.take(maxChars)}...)"
+                    } else {
+                        "String(len=${value.length}, preview=$value)"
+                    }
+                }
+                is Map<*, *> -> {
+                    val keysPreview = value.keys.take(8).joinToString(",") { it?.toString() ?: "null" }
+                    "Map(size=${value.size}, keys=[$keysPreview${if (value.size > 8) ",..." else ""}])"
+                }
+                is List<*> -> {
+                    val firstType = value.firstOrNull()?.javaClass?.simpleName ?: "null"
+                    "List(size=${value.size}, firstType=$firstType)"
+                }
+                is JSONArray -> "JSONArray(len=${value.length()})"
+                is JSONObject -> "JSONObject(keys=${value.length()})"
+                else -> {
+                    val str = value.toString()
+                    if (str.length > maxChars) {
+                        "${value.javaClass.simpleName}(preview=${str.take(maxChars)}...)"
+                    } else {
+                        "${value.javaClass.simpleName}($str)"
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            "<unprintable>"
         }
     }
     
@@ -1950,7 +2053,86 @@ def sentiment_analysis_worker(message_data):
             // avoiding Chaquopy attribute-vs-method pitfalls with __dict__.
             // Force-reload the module first to pick up any APK updates.
             val importPrefix = "import importlib; import dnn_inference; importlib.reload(dnn_inference)\nfrom dnn_inference import *\nimport numpy as np\n"
-            val codeWithImports = importPrefix + funcCode
+            val helperFallbackPrefix = """
+if '_tensorflow_available' not in globals():
+    def _tensorflow_available():
+        try:
+            import tensorflow  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+if '_build_tflite_sub_models' not in globals():
+    def _build_tflite_sub_models(*args, **kwargs):
+        return {}
+
+if '_serialize_tensor' not in globals():
+    def _serialize_tensor(tensor):
+        import base64
+        import io
+        try:
+            import numpy as _np
+            arr = _np.asarray(tensor)
+            buf = io.BytesIO()
+            _np.save(buf, arr)
+            return {
+                'format': 'npy',
+                'dtype': str(arr.dtype),
+                'shape': list(arr.shape),
+                'data_b64': base64.b64encode(buf.getvalue()).decode('utf-8'),
+            }
+        except Exception:
+            return {'format': 'json', 'data': tensor}
+
+if '_deserialize_tensor' not in globals():
+    def _deserialize_tensor(obj):
+        import base64
+        import gzip
+        import numpy as _np
+        if isinstance(obj, str):
+            import json as _json
+            try:
+                obj = _json.loads(obj)
+            except Exception:
+                import ast as _ast
+                obj = _ast.literal_eval(obj)
+
+        if not isinstance(obj, dict):
+            return obj
+
+        if obj.get('format') == 'npy' and obj.get('data_b64'):
+            raw = base64.b64decode(obj['data_b64'])
+            import io as _io
+            return _np.load(_io.BytesIO(raw))
+
+        if obj.get('data') is not None and obj.get('shape') is not None and obj.get('dtype') is not None:
+            data = obj.get('data')
+            if isinstance(data, str):
+                raw = base64.b64decode(data)
+                if obj.get('compressed', False):
+                    raw = gzip.decompress(raw)
+                return _np.frombuffer(raw, dtype=_np.dtype(obj.get('dtype', 'float32'))).reshape(obj.get('shape'))
+            arr = _np.array(data, dtype=obj.get('dtype', 'float32'))
+            return arr.reshape(obj.get('shape')) if obj.get('shape') else arr
+
+        return obj.get('data', obj.get('data_b64', obj))
+
+if '_tflite_interpreter_cache' not in globals():
+    _tflite_interpreter_cache = {}
+
+if '_get_or_create_tflite_interpreter' not in globals():
+    def _get_or_create_tflite_interpreter(tflite_b64_str, interp_cls, tflite_bytes):
+        import hashlib
+        key = hashlib.sha256(tflite_b64_str.encode('utf-8')).hexdigest()
+        cached = _tflite_interpreter_cache.get(key)
+        if cached is not None:
+            return cached
+        interp = interp_cls(model_content=tflite_bytes)
+        _tflite_interpreter_cache[key] = interp
+        return interp
+""".trimIndent() + "\n"
+            val sanitizedCode = sanitizeDynamicPythonCode(funcCode)
+            val codeWithImports = importPrefix + helperFallbackPrefix + sanitizedCode
 
             // Execute the function code — single-dict exec makes globals == locals
             builtinsModule?.callAttr("exec", codeWithImports, execGlobals)
@@ -1966,7 +2148,7 @@ def sentiment_analysis_worker(message_data):
             var func: PyObject? = null
             
             // Try to find function by name first (more reliable)
-            val functionName = extractFunctionName(funcCode)
+            val functionName = extractFunctionName(sanitizedCode)
             if (functionName != null) {
                 val namedFunc = execGlobals?.get(functionName)
                 if (namedFunc != null) {
@@ -2014,6 +2196,100 @@ def sentiment_analysis_worker(message_data):
             Log.e(TAG, "Error deserializing function", e)
             throw e
         }
+    }
+
+    /**
+     * Foreman payloads occasionally include malformed single-quoted f-strings such as:
+     * print(f'... {layer.get('key', 'default')} ...')
+     * which is invalid Python syntax due to quote collisions.
+     *
+     * We defensively rewrite only this narrow pattern to double-quoted outer f-strings.
+     */
+    private fun sanitizeDynamicPythonCode(code: String): String {
+        var working = code
+
+        // Normalize single-quoted dict indexing globally (e.g. v['output_shape'] -> v["output_shape"]).
+        // This prevents quote collisions when such expressions appear inside single-quoted f-strings.
+        working = Regex("\\['([^'\\\\]+)'\\]").replace(working, "[\"$1\"]")
+
+        // Opportunistically switch direct model_content interpreter creation to cached helper.
+        // Applies to run_tflite_partition payloads which expose tflite_b64_str and tflite_bytes.
+        working = working.replace(
+            "_Interp(model_content=tflite_bytes)",
+            "_get_or_create_tflite_interpreter(tflite_b64_str, _Interp, tflite_bytes)"
+        )
+
+        // Some payloads hit the JSON fallback and try to cast a base64 string to float.
+        // Use indentation-safe single-line rewrites to decode binary tensor data when present.
+        working = working.replace(
+            "arr = np.array(data, dtype=blob.get(\"dtype\", \"float32\"))",
+            "arr = (np.frombuffer((__import__('gzip').decompress(base64.b64decode(data)) if blob.get('compressed', False) else base64.b64decode(data)), dtype=np.dtype(blob.get(\"dtype\", \"float32\"))).reshape(blob.get('shape')) if isinstance(data, str) and blob.get('shape') and blob.get('dtype') else np.array(data, dtype=blob.get(\"dtype\", \"float32\")))"
+        )
+
+        working = working.replace(
+            "arr = np.array(data, dtype=blob.get('dtype', 'float32'))",
+            "arr = (np.frombuffer((__import__('gzip').decompress(base64.b64decode(data)) if blob.get('compressed', False) else base64.b64decode(data)), dtype=np.dtype(blob.get('dtype', 'float32'))).reshape(blob.get('shape')) if isinstance(data, str) and blob.get('shape') and blob.get('dtype') else np.array(data, dtype=blob.get('dtype', 'float32')))"
+        )
+
+        // Shrink stage payloads: encode tensors as float16 before npy serialization.
+        working = working.replace(
+            "arr = np.asarray(arr)",
+            "arr = np.asarray(arr, dtype=np.float16)"
+        )
+
+        // Key compatibility: some stages use `data_b64` while others use `data`.
+        // Rewrite strict indexing for any variable (obj['data'], blob["data"], etc.)
+        // to avoid KeyError during mixed-schema pipelines.
+        working = Regex("([A-Za-z_][A-Za-z0-9_]*)\\['data'\\]")
+            .replace(working, "$1.get('data', $1.get('data_b64'))")
+        working = Regex("([A-Za-z_][A-Za-z0-9_]*)\\[\\\"data\\\"\\]")
+            .replace(working, "$1.get('data', $1.get('data_b64'))")
+
+        // Also cover more complex expressions like results[i]["data"] or obj.field['data'].
+        // This catches classify payloads that index into nested structures.
+        working = Regex("([A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]+\\]|\\.[A-Za-z_][A-Za-z0-9_]*)*)\\['data'\\]")
+            .replace(working, "$1.get('data', $1.get('data_b64'))")
+        working = Regex("([A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]+\\]|\\.[A-Za-z_][A-Za-z0-9_]*)*)\\[\\\"data\\\"\\]")
+            .replace(working, "$1.get('data', $1.get('data_b64'))")
+
+        // Guard strict pop('data') calls which raise KeyError when only data_b64 exists.
+        working = Regex("([A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]+\\]|\\.[A-Za-z_][A-Za-z0-9_]*)*)\\.pop\\('data'\\)")
+            .replace(working, "$1.pop('data', $1.get('data_b64'))")
+        working = Regex("([A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]+\\]|\\.[A-Za-z_][A-Za-z0-9_]*)*)\\.pop\\(\\\"data\\\"\\)")
+            .replace(working, "$1.pop('data', $1.get('data_b64'))")
+
+        val lines = working.lines()
+        var changed = false
+
+        val sanitized = lines.map { line ->
+            val converted = convertSingleQuotedFPrintLine(line)
+            if (converted != line) changed = true
+            converted
+        }
+
+        val sanitizedCode = sanitized.joinToString("\n")
+        if (sanitizedCode != code) changed = true
+
+        if (changed) {
+            Log.w(TAG, "Sanitized malformed dynamic Python payload patterns")
+        }
+
+        return sanitizedCode
+    }
+
+    private fun convertSingleQuotedFPrintLine(line: String): String {
+        val marker = "print(f'"
+        val start = line.indexOf(marker)
+        if (start < 0) return line
+
+        val end = line.lastIndexOf("')")
+        if (end <= start + marker.length) return line
+
+        val prefix = line.substring(0, start)
+        val body = line.substring(start + marker.length, end)
+        val suffix = line.substring(end + 2)
+
+        return "$prefix" + "print(f\"$body\")" + suffix
     }
     
     /**

@@ -64,6 +64,8 @@ android {
                 install("requests")
                 install("aiohttp")
                 install("Pillow")
+                install("tflite-runtime")
+
             }
         }
     }
