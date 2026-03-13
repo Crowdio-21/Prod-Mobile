@@ -10,6 +10,7 @@ import com.example.mcc_phase3.checkpoint.TaskMetadata
 import com.example.mcc_phase3.utils.EventLogger
 import com.example.mcc_phase3.utils.NotificationHelper
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
@@ -74,6 +75,31 @@ class TaskProcessor(private val context: Context) {
 
     // Work type detected from incoming func_code
     private val currentWorkType = AtomicReference<String>("Other")
+
+    // --------------- Task queue for DNN parallel branches ---------------
+    // When a task arrives while the worker is busy, it is queued here and
+    // drained sequentially so no task is ever rejected.
+    private data class QueuedTask(val data: JSONObject, val jobId: String?, val result: CompletableDeferred<String>)
+    private val taskQueue = Channel<QueuedTask>(Channel.UNLIMITED)
+
+    init {
+        // Single consumer coroutine — processes queued tasks one at a time
+        processorScope.launch {
+            for (queued in taskQueue) {
+                try {
+                    val response = processTaskAssignmentInternal(queued.data, queued.jobId)
+                    queued.result.complete(response)
+                } catch (e: Exception) {
+                    val errorResp = MessageProtocol.createTaskErrorMessage(
+                        taskId = queued.data.optString("task_id", "unknown"),
+                        jobId = queued.jobId,
+                        error = "Queued task failed: ${e.message}"
+                    )
+                    queued.result.complete(errorResp)
+                }
+            }
+        }
+    }
     
     /**
      * Initialize the task processor
@@ -144,35 +170,44 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
-     * Process task assignment from backend
+     * Process task assignment from backend.
+     * If the worker is idle the task runs immediately; otherwise it is queued
+     * and executed once the current (and any earlier queued) task completes.
      */
     private suspend fun processTaskAssignment(data: JSONObject?, jobId: String?): String {
         // Declare taskId outside try-catch so it's accessible in catch block
         val taskId = data?.optString("task_id", "") ?: ""
         
+        if (data == null) return createErrorResponse("No task data provided")
+        if (taskId.isEmpty()) return createErrorResponse("No task ID provided")
+
+        // If a task is already running, queue this one instead of rejecting it
+        if (isTaskRunning.get()) {
+            Log.i(TAG, "Worker busy with ${currentTaskId.get()}, queuing task $taskId")
+            EventLogger.info(EventLogger.Categories.TASK, "Task $taskId queued (worker busy)")
+            val deferred = CompletableDeferred<String>()
+            taskQueue.trySend(QueuedTask(data, jobId, deferred))
+            return deferred.await()
+        }
+
+        return processTaskAssignmentInternal(data, jobId)
+    }
+
+    /**
+     * Internal task execution — always called when the worker is free.
+     */
+    private suspend fun processTaskAssignmentInternal(data: JSONObject?, jobId: String?): String {
+        val taskId = data?.optString("task_id", "") ?: ""
+        
         return try {
-            if (data == null) {
-                return createErrorResponse("No task data provided")
-            }
-            
-            if (taskId.isEmpty()) {
-                return createErrorResponse("No task ID provided")
-            }
-            
-            // Check if we're already running a task
-            if (isTaskRunning.get()) {
-                Log.w(TAG, "Already running task ${currentTaskId.get()}, rejecting new task $taskId")
-                return createErrorResponse("Worker is busy with task ${currentTaskId.get()}")
-            }
-            
             Log.d(TAG, "Processing task assignment: $taskId")
             
             // Extract function code and task arguments (matching desktop worker format)
-            val funcCode = data.optString("func_code", "")
-            val taskArgs = data.optString("task_args", "")
+            val funcCode = data?.optString("func_code", "") ?: ""
+            val taskArgs = data?.optString("task_args", "") ?: ""
             
             // Parse task_metadata if present (declarative checkpointing configuration)
-            val taskMetadataJson = data.optJSONObject("task_metadata")
+            val taskMetadataJson = data?.optJSONObject("task_metadata")
             val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
             
             if (taskMetadataJson != null) {

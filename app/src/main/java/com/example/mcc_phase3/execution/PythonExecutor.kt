@@ -1942,9 +1942,18 @@ def sentiment_analysis_worker(message_data):
             // functions that use `global paused` will reference this dict, so the
             // flags MUST live here too.
             val execGlobals = pythonInstance?.getModule("builtins")?.callAttr("dict")
-            
+
+            // Pre-import DNN inference helpers (build_resnet_dag, run_layer, etc.)
+            // so foreman-sent code can call them without an explicit import.
+            // We prepend a wildcard import to the code string itself — this is
+            // reliable because Python's own import machinery resolves names,
+            // avoiding Chaquopy attribute-vs-method pitfalls with __dict__.
+            // Force-reload the module first to pick up any APK updates.
+            val importPrefix = "import importlib; import dnn_inference; importlib.reload(dnn_inference)\nfrom dnn_inference import *\nimport numpy as np\n"
+            val codeWithImports = importPrefix + funcCode
+
             // Execute the function code — single-dict exec makes globals == locals
-            builtinsModule?.callAttr("exec", funcCode, execGlobals)
+            builtinsModule?.callAttr("exec", codeWithImports, execGlobals)
             
             // Save the reference so pause/resume/kill can target the same namespace
             execGlobalsRef.set(execGlobals)
