@@ -127,6 +127,20 @@ class MobileWorkerService : Service() {
         serviceScope.cancel()
     }
 
+    override fun onLowMemory() {
+        super.onLowMemory()
+        Log.w(TAG, "onLowMemory received; triggering model cache cleanup")
+        runCatching { taskProcessor.handleLowStorageEvent() }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            Log.w(TAG, "onTrimMemory(level=$level) received; triggering model cache cleanup")
+            runCatching { taskProcessor.handleLowStorageEvent() }
+        }
+    }
+
     /**
      * Called when the app is removed from recent tasks
      * Keep the service running if worker is active
@@ -262,11 +276,14 @@ class MobileWorkerService : Service() {
                     Log.d(TAG, "Mobile worker started successfully")
                     EventLogger.success(EventLogger.Categories.WORKER, "Worker started successfully (ID: $workerId)")
                 } else {
-                    Log.e(TAG, "Failed to connect to WebSocket")
-                    EventLogger.error(EventLogger.Categories.WORKER, "Failed to connect to foreman")
+                    Log.w(TAG, "WebSocket not connected (may still be connecting/retrying)")
+                    EventLogger.warning(EventLogger.Categories.WORKER, "Not connected yet; worker will continue retrying")
                     updateNotification("Mobile Worker Service", "Worker running (connecting...)")
                 }
 
+            } catch (e: CancellationException) {
+                Log.i(TAG, "Worker start coroutine cancelled: ${e.message}")
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start worker", e)
                 updateNotification("Mobile Worker Service", "Worker error: ${e.message}")
