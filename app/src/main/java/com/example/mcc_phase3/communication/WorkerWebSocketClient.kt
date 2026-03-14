@@ -2,15 +2,25 @@ package com.example.mcc_phase3.communication
 
 import android.content.Context
 import android.util.Log
+import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.execution.TaskProcessor
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.utils.EventLogger
 import com.example.mcc_phase3.utils.NotificationHelper
 import kotlinx.coroutines.*
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import org.java_websocket.client.WebSocketClient
+import org.java_websocket.drafts.Draft_6455
 import org.java_websocket.handshake.ServerHandshake
+import java.io.File
 import java.net.URI
+import java.util.Collections
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
@@ -33,14 +43,37 @@ class WorkerWebSocketClient(
         private const val HEARTBEAT_INTERVAL = 30000L // 30 seconds
         private const val RECONNECT_DELAY = 5000L // 5 seconds
         private const val MAX_RECONNECT_ATTEMPTS = 10
+        // Some foreman payloads can be large during transition periods. Keep this high enough
+        // to avoid immediate 1009 disconnects while Kotlin strips heavy fields downstream.
+        private const val MAX_INBOUND_FRAME_BYTES = 64 * 1024 * 1024 // 64 MB hard cap
+        // Allow moderate result payloads while still capping oversized frames.
+        // This value should stay below backend or proxy hard limits.
+        private const val MAX_OUTBOUND_MESSAGE_BYTES = 4 * 1024 * 1024
+        private const val DISCONNECT_NOTIFY_COOLDOWN_MS = 30_000L
+        private const val DEFAULT_RESULT_UPLOAD_PORT = 8001
+        private const val RESULT_UPLOAD_PATH = "/upload"
     }
+
+    private data class UploadOutcome(
+        val fileUrl: String?,
+        val error: String?
+    )
     
     private val workerIdManager = WorkerIdManager.getInstance(context)
+    private val configManager = ConfigManager.getInstance(context)
+    private val resultUploadClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
     
     private var webSocket: WebSocketClient? = null
     private val isConnected = AtomicBoolean(false)
     private val isRunning = AtomicBoolean(false)
+    private val isConnecting = AtomicBoolean(false)
     private val reconnectAttempts = AtomicLong(0)
+    private val lastDisconnectNotificationAt = AtomicLong(0)
     
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
@@ -54,6 +87,10 @@ class WorkerWebSocketClient(
      */
     suspend fun connect(url: String): Boolean {
         return withContext(Dispatchers.IO) {
+            if (!isConnecting.compareAndSet(false, true)) {
+                Log.d(TAG, "connect() skipped: another connect attempt is already in progress")
+                return@withContext isConnected.get()
+            }
             try {
                 Log.d(TAG, "Connecting to WebSocket: $url")
                 
@@ -75,7 +112,13 @@ class WorkerWebSocketClient(
                 }
                 
                 val uri = URI(url)
-                webSocket = object : WebSocketClient(uri) {
+                val draft = Draft_6455(
+                    Collections.emptyList(),
+                    MAX_INBOUND_FRAME_BYTES
+                )
+                val connectResult = CompletableDeferred<Boolean>()
+
+                webSocket = object : WebSocketClient(uri, draft) {
                     override fun onOpen(handshake: ServerHandshake?) {
                         Log.d(TAG, "WebSocket connected to $url")
                         EventLogger.success(EventLogger.Categories.WEBSOCKET, "Connected to foreman: $url")
@@ -91,11 +134,16 @@ class WorkerWebSocketClient(
                         
                         // Notify listeners
                         listeners.forEach { it.onConnected() }
+
+                        if (!connectResult.isCompleted) {
+                            connectResult.complete(true)
+                        }
                     }
                     
                     override fun onMessage(message: String?) {
                         message?.let { msg ->
-                            Log.d(TAG, "Received message: $msg")
+                            val preview = if (msg.length > 512) "${msg.take(512)}..." else msg
+                            Log.d(TAG, "Received message (${msg.length} chars): $preview")
                             clientScope.launch {
                                 handleMessage(msg)
                             }
@@ -104,42 +152,67 @@ class WorkerWebSocketClient(
                     
                     override fun onClose(code: Int, reason: String?, remote: Boolean) {
                         Log.w(TAG, "WebSocket closed (code=$code, reason=$reason, remote=$remote)")
+                        if (code == 1009) {
+                            Log.e(
+                                TAG,
+                                "WebSocket closed with 1009 (message too large). " +
+                                    "Likely oversized inbound payload from foreman; prefer metadata-only task payloads."
+                            )
+                        }
                         EventLogger.warning(EventLogger.Categories.WEBSOCKET, "Disconnected (code=$code, reason=$reason)")
-                        NotificationHelper.notifyWorkerDisconnected(context, reason)
-                        isConnected.set(false)
+                        val wasConnected = isConnected.getAndSet(false)
+                        maybeNotifyDisconnected(wasConnected, reason)
                         stopHeartbeat()
                         
                         // Notify listeners
                         listeners.forEach { it.onDisconnected() }
+
+                        if (!connectResult.isCompleted) {
+                            connectResult.complete(false)
+                        }
                         
-                        // Attempt reconnection if not manually disconnected
-                        if (isRunning.get() && !remote) {
+                        // Attempt reconnection whenever the worker is running.
+                        // Manual disconnect sets isRunning=false before closing.
+                        if (isRunning.get()) {
                             scheduleReconnection(url)
                         }
                     }
                     
                     override fun onError(ex: Exception?) {
                         Log.e(TAG, "WebSocket error", ex)
+                        if (ex?.message?.contains("max frame", ignoreCase = true) == true ||
+                            ex?.message?.contains("frame size", ignoreCase = true) == true ||
+                            ex?.message?.contains("Failed to allocate", ignoreCase = true) == true
+                        ) {
+                            Log.e(TAG, "Inbound WebSocket frame exceeded safe limit ($MAX_INBOUND_FRAME_BYTES bytes)")
+                            EventLogger.error(
+                                EventLogger.Categories.WEBSOCKET,
+                                "Inbound frame too large; closing socket to avoid OOM"
+                            )
+                            webSocket?.close()
+                        }
                         EventLogger.error(EventLogger.Categories.WEBSOCKET, "Connection error: ${ex?.message ?: "Unknown"}")
                         listeners.forEach { it.onError(ex) }
+
+                        if (!connectResult.isCompleted) {
+                            connectResult.complete(false)
+                        }
                     }
                 }
                 
                 webSocket?.connect()
                 isRunning.set(true)
-                
-                // Wait for connection with timeout
-                var attempts = 0
-                while (!isConnected.get() && attempts < 30) { // 30 second timeout
-                    delay(1000)
-                    attempts++
-                }
-                
-                isConnected.get()
-                
+
+                withTimeoutOrNull(30_000L) { connectResult.await() } ?: false
+            } catch (e: CancellationException) {
+                // Expected when service stops, reconnect is replaced, or caller scope is cancelled.
+                Log.i(TAG, "WebSocket connect coroutine cancelled: ${e.message}")
+                false
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to connect to WebSocket", e)
                 false
+            } finally {
+                isConnecting.set(false)
             }
         }
     }
@@ -164,6 +237,15 @@ class WorkerWebSocketClient(
     fun sendMessage(message: String) {
         if (isConnected.get()) {
             try {
+                val sizeBytes = message.toByteArray(Charsets.UTF_8).size
+                if (sizeBytes > MAX_OUTBOUND_MESSAGE_BYTES) {
+                    Log.e(TAG, "Refusing to send oversized WebSocket message (${sizeBytes}B > ${MAX_OUTBOUND_MESSAGE_BYTES}B)")
+                    EventLogger.error(
+                        EventLogger.Categories.WEBSOCKET,
+                        "Outbound message too large (${sizeBytes}B); dropped to avoid close code 1009"
+                    )
+                    return
+                }
                 webSocket?.send(message)
                 Log.d(TAG, "Message sent: $message")
             } catch (e: Exception) {
@@ -225,7 +307,7 @@ class WorkerWebSocketClient(
      */
     private suspend fun handleMessage(message: String) {
         try {
-            Log.d(TAG, "Processing message: $message")
+            Log.d(TAG, "Processing message (${message.length} chars)")
             
             // Parse the message using the new protocol
             val messageData = MessageProtocol.parseMessage(message)
@@ -299,8 +381,8 @@ class WorkerWebSocketClient(
             
             // Send response back to backend
             response?.let { resp ->
-                sendMessage(resp)
-                Log.d(TAG, "Task result sent: $resp")
+                sendTaskResponseWithSizeGuard(taskId, messageData.jobId, resp)
+                Log.d(TAG, "Task result sent")
             }
             
         } catch (e: Exception) {
@@ -358,8 +440,8 @@ class WorkerWebSocketClient(
             
             // Send response back to backend
             response?.let { resp ->
-                sendMessage(resp)
-                Log.d(TAG, "Task result sent (resumed): $resp")
+                sendTaskResponseWithSizeGuard(taskId, messageData.jobId, resp)
+                Log.d(TAG, "Task result sent (resumed)")
             }
             
         } catch (e: Exception) {
@@ -433,6 +515,134 @@ class WorkerWebSocketClient(
         heartbeatJob?.cancel()
         heartbeatJob = null
     }
+
+    private fun sendTaskResponseWithSizeGuard(taskId: String, jobId: String?, response: String) {
+        val responseSize = response.toByteArray(Charsets.UTF_8).size
+        if (responseSize <= MAX_OUTBOUND_MESSAGE_BYTES) {
+            sendMessage(response)
+            return
+        }
+
+        Log.w(TAG, "Task response too large (${responseSize}B > ${MAX_OUTBOUND_MESSAGE_BYTES}B), uploading result payload to HTTP server")
+        val upload = uploadOversizedTaskResponse(taskId, response)
+        if (!upload.fileUrl.isNullOrBlank()) {
+            val offloadedMessage = createOffloadedTaskResultMessage(
+                taskId = taskId,
+                jobId = jobId,
+                fileUrl = upload.fileUrl,
+                originalBytes = responseSize
+            )
+            sendMessage(offloadedMessage)
+            Log.i(TAG, "Oversized task result offloaded: taskId=$taskId file_url=${upload.fileUrl}")
+            return
+        }
+
+        Log.e(TAG, "Failed to offload oversized task result: ${upload.error ?: "unknown upload error"}")
+        val compactError = MessageProtocol.createTaskErrorMessage(
+            taskId = taskId,
+            jobId = jobId,
+            error = "Task result too large for transport (${responseSize} bytes) and upload failed: ${upload.error ?: "unknown upload error"}"
+        )
+        sendMessage(compactError)
+    }
+
+    private fun uploadOversizedTaskResponse(taskId: String, response: String): UploadOutcome {
+        val foremanIp = configManager.getForemanIP().trim()
+        if (foremanIp.isBlank()) {
+            return UploadOutcome(fileUrl = null, error = "Foreman IP is not configured")
+        }
+
+        val uploadUrl = "http://$foremanIp:$DEFAULT_RESULT_UPLOAD_PORT$RESULT_UPLOAD_PATH"
+        val tempFile = File(context.cacheDir, "task_result_${System.currentTimeMillis()}_${taskId}.json")
+
+        return try {
+            tempFile.writeText(response, Charsets.UTF_8)
+
+            val filePart = tempFile.asRequestBody("application/json".toMediaTypeOrNull())
+            val multipartBody = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", tempFile.name, filePart)
+                .build()
+
+            val request = Request.Builder()
+                .url(uploadUrl)
+                .post(multipartBody)
+                .build()
+
+            resultUploadClient.newCall(request).execute().use { responseHttp ->
+                if (!responseHttp.isSuccessful) {
+                    return UploadOutcome(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> HTTP ${responseHttp.code} (${responseHttp.message})"
+                    )
+                }
+
+                val body = responseHttp.body?.string().orEmpty()
+                if (body.isBlank()) {
+                    return UploadOutcome(fileUrl = null, error = "POST $uploadUrl -> empty response body")
+                }
+
+                val json = JSONObject(body)
+                val fileUrl = json.optString("file_url", "").trim()
+                if (fileUrl.isBlank()) {
+                    UploadOutcome(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> response missing file_url (body=${body.take(300)})"
+                    )
+                } else {
+                    UploadOutcome(fileUrl = fileUrl, error = null)
+                }
+            }
+        } catch (e: Exception) {
+            UploadOutcome(
+                fileUrl = null,
+                error = "POST $uploadUrl -> ${e.javaClass.simpleName}: ${e.message ?: "unknown exception"}"
+            )
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private fun createOffloadedTaskResultMessage(
+        taskId: String,
+        jobId: String?,
+        fileUrl: String,
+        originalBytes: Int
+    ): String {
+        return JSONObject().apply {
+            put("type", MessageProtocol.MessageType.TASK_RESULT)
+            put("data", JSONObject().apply {
+                put("task_id", taskId)
+                put("execution_time", 0.0)
+                put(
+                    "result",
+                    JSONObject().apply {
+                        put("transport", "http_url")
+                        put("result_file_url", fileUrl)
+                        put("result_offloaded", true)
+                        put("original_result_bytes", originalBytes)
+                    }
+                )
+            })
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
+        }.toString()
+    }
+
+    private fun maybeNotifyDisconnected(wasConnected: Boolean, reason: String?) {
+        if (!wasConnected) return
+
+        val now = System.currentTimeMillis()
+        val prev = lastDisconnectNotificationAt.get()
+        if (now - prev < DISCONNECT_NOTIFY_COOLDOWN_MS) {
+            Log.d(TAG, "Skipping disconnect notification (cooldown active)")
+            return
+        }
+
+        if (lastDisconnectNotificationAt.compareAndSet(prev, now)) {
+            NotificationHelper.notifyWorkerDisconnected(context, reason)
+        }
+    }
     
     /**
      * Schedule reconnection attempt
@@ -442,8 +652,12 @@ class WorkerWebSocketClient(
             Log.e(TAG, "🚨 Max reconnection attempts reached, giving up")
             return
         }
-        
-        reconnectJob?.cancel()
+
+        if (reconnectJob?.isActive == true) {
+            Log.d(TAG, "Reconnection already scheduled; skipping duplicate schedule request")
+            return
+        }
+
         reconnectJob = clientScope.launch {
             val attempt = reconnectAttempts.incrementAndGet()
             val delay = RECONNECT_DELAY * attempt // Exponential backoff
@@ -453,8 +667,14 @@ class WorkerWebSocketClient(
             
             if (isRunning.get() && !isConnected.get()) {
                 Log.d(TAG, "Attempting reconnection #$attempt")
-                connect(url)
+                // Run connect in a separate child so reconnect scheduling cancellation
+                // does not cancel an in-flight connection attempt.
+                clientScope.launch {
+                    connect(url)
+                }
             }
+
+            reconnectJob = null
         }
     }
     
