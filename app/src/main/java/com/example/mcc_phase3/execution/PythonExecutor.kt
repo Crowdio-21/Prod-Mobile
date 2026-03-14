@@ -241,7 +241,8 @@ print("[Android Worker] Checkpoint capture disabled")
                 // Set up progress callback for real-time progress reporting
                 setupProgressCallback()
 
-                previousWorkingDirectory = prepareImageInputsIfNeeded(pythonCode, argsJsonRaw)
+                val aliasPreparation = prepareCrowdioAliasesForExecution(pythonCode, argsJsonRaw)
+                previousWorkingDirectory = aliasPreparation.previousWorkingDirectory
 
                 // Execute the Python code using the desktop worker approach
                 val result = executeFunctionCode(pythonCode, args)
@@ -254,6 +255,9 @@ print("[Android Worker] Checkpoint capture disabled")
 
                 // Clean up injected image paths
                 cleanupSelectedImages()
+
+                // Clean up injected Crowdio aliases
+                cleanupCrowdioPathAliases()
 
                 // Restore previous working directory if it was changed
                 restoreWorkingDirectory(previousWorkingDirectory)
@@ -271,6 +275,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 cleanupCheckpointCallback()
                 cleanupProgressCallback()
                 cleanupSelectedImages()
+                cleanupCrowdioPathAliases()
                 restoreWorkingDirectory(previousWorkingDirectory)
                 EventLogger.error(EventLogger.Categories.PYTHON, "Python execution failed: ${e.message}")
                 // Encode the error as a JSON string so the backend always receives a parseable result
@@ -349,7 +354,8 @@ print("[Android Worker] Checkpoint capture disabled")
                     pythonCode = getMobileCompatibleSentimentFunction()
                 }
 
-                previousWorkingDirectory = prepareImageInputsIfNeeded(pythonCode, taskArgsJson)
+                val aliasPreparation = prepareCrowdioAliasesForExecution(pythonCode, taskArgsJson)
+                previousWorkingDirectory = aliasPreparation.previousWorkingDirectory
                 
                 // Execute with isResume=true to inject resume logic
                 val result = executeFunctionCode(pythonCode, taskArgs, isResume = true)
@@ -358,6 +364,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
                 cleanupSelectedImages()
+                cleanupCrowdioPathAliases()
                 restoreWorkingDirectory(previousWorkingDirectory)
 
                 Log.d(TAG, "Resumed Python code executed successfully")
@@ -374,6 +381,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
                 cleanupSelectedImages()
+                cleanupCrowdioPathAliases()
                 restoreWorkingDirectory(previousWorkingDirectory)
                 mapOf<String, Any?>(
                     "status" to "error",
@@ -1595,6 +1603,210 @@ def sentiment_analysis_worker(message_data):
             v.contains("(") || v.contains("[") && !v.startsWith("[") -> false
             // Otherwise not a default
             else -> false
+        }
+    }
+
+    private data class AliasPreparation(
+        val previousWorkingDirectory: String?,
+        val aliasesInjected: Boolean
+    )
+
+    private suspend fun prepareCrowdioAliasesForExecution(code: String, argsJson: String?): AliasPreparation {
+        val previousWorkingDirectory = prepareImageInputsIfNeeded(code, argsJson)
+
+        if (!containsCrowdioAliasToken(code, argsJson)) {
+            return AliasPreparation(previousWorkingDirectory = previousWorkingDirectory, aliasesInjected = false)
+        }
+
+        val resolvedFileDir = resolveFileDirForAliases(argsJson)
+            ?: throw IllegalStateException(
+                "Path alias was not resolved on worker. " +
+                    "Unable to resolve ${CrowdioPathAliasResolver.FILE_DIR} from selected folder or task config."
+            )
+
+        val resolvedOutputDir = resolveOutputDirForAliases(argsJson)
+
+        val validationError = CrowdioPathAliasResolver.validate(resolvedFileDir, resolvedOutputDir)
+        if (validationError != null) {
+            throw IllegalStateException("Crowdio path alias validation failed: $validationError")
+        }
+
+        val aliases = CrowdioPathAliasResolver.buildAliasMap(
+            fileDir = resolvedFileDir,
+            cacheDir = context.cacheDir.absolutePath,
+            outputDir = resolvedOutputDir
+        )
+
+        injectCrowdioPathAliases(aliases)
+        return AliasPreparation(previousWorkingDirectory = previousWorkingDirectory, aliasesInjected = true)
+    }
+
+    private fun containsCrowdioAliasToken(code: String, argsJson: String?): Boolean {
+        if (code.contains("@CROWDIO:")) return true
+        return argsJson?.contains("@CROWDIO:") == true
+    }
+
+    private fun resolveFileDirForAliases(argsJson: String?): String? {
+        val workingDirectoryRaw = resolveWorkingDirectoryRaw(argsJson)
+        if (!workingDirectoryRaw.isNullOrBlank()) {
+            if (workingDirectoryRaw.startsWith("content://")) {
+                val stagedPaths = collectImagePathsFromTreeUri(workingDirectoryRaw)
+                if (stagedPaths.isNotEmpty()) {
+                    injectSelectedImages(stagedPaths)
+                    val stagedDir = File(stagedPaths.first()).parentFile?.absolutePath
+                    if (!stagedDir.isNullOrBlank()) {
+                        Log.i(TAG, "Resolved ${CrowdioPathAliasResolver.FILE_DIR} from SAF folder staging: $stagedDir")
+                        return stagedDir
+                    }
+                }
+                Log.e(TAG, "Failed to stage files from selected SAF folder for ${CrowdioPathAliasResolver.FILE_DIR}")
+                return null
+            }
+
+            val normalized = normalizeWorkingDirectoryValue(workingDirectoryRaw)
+            if (!normalized.isNullOrBlank()) {
+                val file = File(normalized)
+                if (file.exists() && file.isDirectory) {
+                    Log.i(TAG, "Resolved ${CrowdioPathAliasResolver.FILE_DIR} from working directory: ${file.absolutePath}")
+                    return file.absolutePath
+                }
+            }
+        }
+
+        val injectedDir = getInjectedImageDirectory()
+        if (!injectedDir.isNullOrBlank()) {
+            Log.i(TAG, "Resolved ${CrowdioPathAliasResolver.FILE_DIR} from injected image paths: $injectedDir")
+            return injectedDir
+        }
+
+        return null
+    }
+
+    private fun resolveOutputDirForAliases(argsJson: String?): String {
+        val fromArgs = extractOutputDirectoryFromArgs(argsJson)?.trim()
+
+        val resolved = when {
+            fromArgs.isNullOrBlank() -> defaultOutputDirectory()
+            CrowdioPathAliasResolver.isAliasToken(fromArgs) -> defaultOutputDirectory()
+            fromArgs.startsWith("content://") -> {
+                Log.w(TAG, "Output directory from SAF URI is not directly writable by Python; using app-local output directory")
+                defaultOutputDirectory()
+            }
+            else -> fromArgs
+        }
+
+        val outputFile = File(resolved)
+        if (!outputFile.exists() && !outputFile.mkdirs()) {
+            throw IllegalStateException("Could not create output directory: $resolved")
+        }
+
+        return outputFile.absolutePath
+    }
+
+    private fun defaultOutputDirectory(): String {
+        return File(context.filesDir, "crowdio_output").absolutePath
+    }
+
+    private fun extractOutputDirectoryFromArgs(argsJson: String?): String? {
+        if (argsJson.isNullOrBlank()) return null
+
+        return try {
+            val trimmed = argsJson.trim()
+            when {
+                trimmed.startsWith("{") -> extractOutputDirectoryFromObject(JSONObject(trimmed))
+                trimmed.startsWith("[") -> extractOutputDirectoryFromArray(JSONArray(trimmed))
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not parse task args for output directory: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractOutputDirectoryFromObject(obj: JSONObject): String? {
+        val candidateKeys = listOf("output_dir", "outputDir", "output_directory", "outputDirectory")
+
+        for (key in candidateKeys) {
+            val value = obj.optString(key, "").trim()
+            if (value.isNotEmpty()) return value
+        }
+
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = obj.opt(key) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractOutputDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractOutputDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractOutputDirectoryFromArray(arr: JSONArray): String? {
+        for (i in 0 until arr.length()) {
+            val value = arr.opt(i) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractOutputDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractOutputDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    private fun injectCrowdioPathAliases(aliases: Map<String, String>) {
+        try {
+            val pyDict = builtinsModule?.callAttr("dict") ?: return
+            aliases.forEach { (key, value) ->
+                pyDict.callAttr("__setitem__", key, value)
+            }
+            builtinsModule?.put("_crowdio_path_aliases", pyDict)
+            Log.i(
+                TAG,
+                "Injected _crowdio_path_aliases: FILE_DIR=${aliases[CrowdioPathAliasResolver.FILE_DIR]}, " +
+                    "CACHE_DIR=${aliases[CrowdioPathAliasResolver.CACHE_DIR]}, " +
+                    "OUTPUT_DIR=${aliases[CrowdioPathAliasResolver.OUTPUT_DIR]}"
+            )
+        } catch (e: Exception) {
+            throw IllegalStateException("Failed to inject _crowdio_path_aliases into Python builtins: ${e.message}")
+        }
+    }
+
+    private fun cleanupCrowdioPathAliases() {
+        try {
+            val hasAttr = builtinsModule?.callAttr("hasattr", builtinsModule, "_crowdio_path_aliases")
+                ?.toJava(Boolean::class.java) == true
+            if (hasAttr) {
+                builtinsModule?.callAttr("delattr", builtinsModule, "_crowdio_path_aliases")
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "cleanupCrowdioPathAliases: ${e.message}")
+        }
+    }
+
+    private fun getInjectedImageDirectory(): String? {
+        return try {
+            val selected = builtinsModule?.callAttr("getattr", builtinsModule, "_selected_images", null)
+                ?: return null
+            val length = selected.callAttr("__len__")?.toJava(Int::class.java) ?: 0
+            if (length <= 0) return null
+            val firstPath = selected.callAttr("__getitem__", 0)?.toString() ?: return null
+            val dir = File(firstPath).parentFile?.absolutePath
+            if (dir.isNullOrBlank()) null else dir
+        } catch (_: Exception) {
+            null
         }
     }
 

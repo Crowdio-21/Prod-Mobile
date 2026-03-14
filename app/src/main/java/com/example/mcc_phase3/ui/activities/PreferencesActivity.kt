@@ -24,7 +24,16 @@ class PreferencesActivity : AppCompatActivity() {
             // Persist read/write access across reboots
             val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                     Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            contentResolver.takePersistableUriPermission(uri, flags)
+            try {
+                contentResolver.takePersistableUriPermission(uri, flags)
+            } catch (e: SecurityException) {
+                Snackbar.make(
+                    findViewById(android.R.id.content),
+                    "Permission not granted for selected folder",
+                    Snackbar.LENGTH_LONG
+                ).show()
+                return@registerForActivityResult
+            }
 
             configManager.setWorkingDir(uri.toString())
             updateWorkingDirDisplay(uri.toString())
@@ -41,6 +50,7 @@ class PreferencesActivity : AppCompatActivity() {
         setContentView(R.layout.activity_preferences)
 
         configManager = ConfigManager.getInstance(this)
+        validatePersistedWorkingDirectory()
 
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
@@ -80,6 +90,31 @@ class PreferencesActivity : AppCompatActivity() {
                 .removePrefix("primary:")
                 .replace("%3A", "/")
             workingDirText.text = if (decoded.isNotBlank()) "/$decoded" else uriString
+        }
+    }
+
+    private fun validatePersistedWorkingDirectory() {
+        val saved = configManager.getWorkingDir().trim()
+        if (saved.isEmpty()) return
+
+        val uri = try {
+            Uri.parse(saved)
+        } catch (_: Exception) {
+            configManager.setWorkingDir("")
+            return
+        }
+
+        val hasPermission = contentResolver.persistedUriPermissions.any { permission ->
+            permission.uri == uri && permission.isReadPermission
+        }
+
+        if (!hasPermission) {
+            configManager.setWorkingDir("")
+            Snackbar.make(
+                findViewById(android.R.id.content),
+                "Saved folder access was revoked. Please select folder again.",
+                Snackbar.LENGTH_LONG
+            ).show()
         }
     }
 }
