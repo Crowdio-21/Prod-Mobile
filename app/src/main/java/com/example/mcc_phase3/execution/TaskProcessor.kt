@@ -1,19 +1,29 @@
 package com.example.mcc_phase3.execution
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.communication.MessageProtocol
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.checkpoint.TaskMetadata
+import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.utils.EventLogger
 import com.example.mcc_phase3.utils.NotificationHelper
+import android.os.SystemClock
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -34,9 +44,13 @@ class TaskProcessor(private val context: Context) {
         /** Maximum wall-clock time (ms) a single task may run before it is force-cancelled. */
         private const val TASK_TIMEOUT_MS = 10 * 60 * 1000L  // 10 minutes
         private const val MAX_TRANSIENT_RETRIES = 1
-        // Base64 expands binary by ~33%. A common 1x224x224x64 float32 tensor can be ~17MB in base64.
-        // Keep a guard, but set it high enough to allow valid partition outputs.
-        private const val MAX_OUTPUT_TENSOR_B64_CHARS = 24 * 1024 * 1024
+        // Keep websocket payloads small for mobile reliability. Inline base64 tensor blobs
+        // should be avoided; pass references/URIs instead.
+        private const val MAX_OUTPUT_TENSOR_B64_CHARS = 700 * 1024
+        private const val DEFAULT_TENSOR_UPLOAD_PORT = 8001
+        private const val TENSOR_UPLOAD_PATH = "/upload"
+        private const val DEFAULT_MODEL_ARTIFACT_HTTP_PORT = 8001
+        private const val DEFAULT_MODEL_STORE_HTTP_PREFIX = "/.model_store"
 
         // Task types
         private const val TASK_TYPE_ASSIGN = "assign_task"
@@ -52,6 +66,14 @@ class TaskProcessor(private val context: Context) {
     
     private val workerIdManager = WorkerIdManager.getInstance(context)
     private val pythonExecutor = PythonExecutor(context)
+    private val modelRepository = ModelRepository(context)
+    private val configManager = ConfigManager.getInstance(context)
+    private val tensorUploadClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
     private val isInitialized = AtomicBoolean(false)
     
     // Checkpoint handler for periodic progress reporting
@@ -93,6 +115,16 @@ class TaskProcessor(private val context: Context) {
         val partitionIdx: Int? = null
     )
 
+    private data class TflitePreparationResult(
+        val taskArgs: String,
+        val telemetry: JSONObject?
+    )
+
+    private data class TensorUploadResult(
+        val fileUrl: String?,
+        val error: String?
+    )
+
     init {
         // Single consumer coroutine — processes queued tasks one at a time
         processorScope.launch {
@@ -124,6 +156,12 @@ class TaskProcessor(private val context: Context) {
                 if (!pythonInitialized) {
                     Log.e(TAG, "Failed to initialize Python executor")
                     return@withContext false
+                }
+
+                try {
+                    modelRepository.cleanupOnStartup()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Model cache startup cleanup failed: ${e.message}")
                 }
                 
                 isInitialized.set(true)
@@ -248,9 +286,58 @@ class TaskProcessor(private val context: Context) {
             }
 
             val normalizedTaskArgs = normalizeTaskArgsForStage(taskArgs, stageInfo)
+            var modelTelemetry: JSONObject? = null
+            val finalTaskArgs = if (stageInfo.stageName == "tflite_partition") {
+                val prepared = prepareTflitePartitionArgs(normalizedTaskArgs, data, stageInfo.partitionIdx)
+                modelTelemetry = prepared.telemetry
+                prepared.taskArgs
+            } else {
+                normalizedTaskArgs
+            }
+
+            val finalFuncCode = if (stageInfo.stageName == "tflite_partition") {
+                val probe = pythonExecutor.probeTfliteBackend()
+                if (!probe.available) {
+                    return MessageProtocol.createTaskErrorMessage(
+                        taskId = taskId,
+                        jobId = jobId,
+                        error = "No usable TFLite backend on Android worker (backend=${probe.backend}). ${probe.details}"
+                    )
+                }
+                Log.i(TAG, "TFLite backend probe passed: backend=${probe.backend} details=${probe.details}")
+                // Rewrite payload so Android uses pre-resolved local model file.
+                val rewrittenCode = funcCode
+                    .replace(
+                        Regex("def\\s+run_tflite_partition\\s*\\(\\s*task_input\\s*\\):"),
+                        "def run_tflite_partition(task_input):\n    local_model_path = task_input.get('local_model_path')\n    if local_model_path and not task_input.get('tflite_b64_str'):\n        with open(local_model_path, 'rb') as _f:\n            task_input['tflite_b64_str'] = base64.b64encode(_f.read()).decode('utf-8')"
+                    )
+                    .replace(
+                        Regex("def\\s+_run_tflite\\s*\\(\\s*tflite_b64_str\\s*,\\s*input_array\\s*\\):"),
+                        "def _run_tflite(input_array):"
+                    )
+                    .replace(
+                        Regex("_run_tflite\\s*\\(\\s*tflite_b64_str\\s*,\\s*input_array\\s*\\)"),
+                        "_run_tflite(input_array)"
+                    )
+                    .replace(
+                        Regex("tflite_bytes\\s*=\\s*base64\\.b64decode\\(tflite_b64_str\\)"),
+                        "tflite_bytes = open(task_input['local_model_path'], 'rb').read()"
+                    )
+                val rewriteApplied = rewrittenCode != funcCode
+                val oldSigStillPresent = Regex("def\\s+_run_tflite\\s*\\(\\s*tflite_b64_str").containsMatchIn(rewrittenCode)
+                val oldCallStillPresent = Regex("_run_tflite\\s*\\(\\s*tflite_b64_str\\s*,").containsMatchIn(rewrittenCode)
+                val base64DecodeStillPresent = Regex("base64\\.b64decode\\(tflite_b64_str\\)").containsMatchIn(rewrittenCode)
+                Log.i(
+                    TAG,
+                    "TFLite payload rewrite applied=$rewriteApplied oldSigStillPresent=$oldSigStillPresent oldCallStillPresent=$oldCallStillPresent base64DecodeStillPresent=$base64DecodeStillPresent"
+                )
+                rewrittenCode
+            } else {
+                funcCode
+            }
             
             // Detect and store work type before execution starts
-            currentWorkType.set(detectWorkType(funcCode))
+            currentWorkType.set(detectWorkType(finalFuncCode))
             Log.d(TAG, "Work type detected: ${currentWorkType.get()} for task $taskId")
 
             // Set current task and job
@@ -327,7 +414,7 @@ class TaskProcessor(private val context: Context) {
                 }
                 
                 // Execute the function code (matching desktop worker format)
-                val executionResult = executeCodeWithRetry(funcCode, normalizedTaskArgs, stageInfo)
+                val executionResult = executeCodeWithRetry(finalFuncCode, finalTaskArgs, stageInfo)
 
                 val executionStatus = executionResult["status"] as? String ?: "error"
                 val executionMessage = executionResult["message"] as? String ?: "Unknown error"
@@ -344,7 +431,7 @@ class TaskProcessor(private val context: Context) {
                 } else {
                     // Ensure result is never null — fall back to empty JSON object
                     val rawResult = executionResult["result"]
-                    val normalized = normalizeAndValidateResult(rawResult, stageInfo)
+                    val normalized = normalizeAndValidateResult(rawResult, stageInfo, modelTelemetry)
                     if (normalized.optString("status") == "error") {
                         return MessageProtocol.createTaskErrorMessage(
                             taskId = taskId,
@@ -544,6 +631,13 @@ class TaskProcessor(private val context: Context) {
             if (!originalArgs.has("partition_idx")) {
                 originalArgs.put("partition_idx", idx)
             }
+            // Keep Android payload metadata-only; model bytes are resolved locally.
+            first.remove("tflite_models")
+            first.remove("tflite_b64")
+            first.remove("tflite_b64_str")
+            originalArgs.remove("tflite_models")
+            originalArgs.remove("tflite_b64")
+            originalArgs.remove("tflite_b64_str")
             if (!first.has("upstream_results")) {
                 first.put("upstream_results", JSONObject())
             }
@@ -603,7 +697,168 @@ class TaskProcessor(private val context: Context) {
         }
     }
 
-    private fun normalizeAndValidateResult(rawResult: Any?, stageInfo: StageInfo): JSONObject {
+    private suspend fun prepareTflitePartitionArgs(
+        taskArgs: String,
+        taskData: JSONObject?,
+        partitionIdx: Int?
+    ): TflitePreparationResult {
+        val idx = partitionIdx ?: return TflitePreparationResult(taskArgs = taskArgs, telemetry = null)
+        val started = SystemClock.elapsedRealtime()
+
+        val rootArray = if (taskArgs.trim().startsWith("[")) {
+            JSONArray(taskArgs)
+        } else {
+            JSONArray().apply {
+                if (taskArgs.trim().startsWith("{")) put(JSONObject(taskArgs))
+            }
+        }
+
+        val first = if (rootArray.length() > 0 && rootArray.optJSONObject(0) != null) {
+            rootArray.getJSONObject(0)
+        } else {
+            JSONObject().also { rootArray.put(it) }
+        }
+        val originalArgs = first.optJSONObject("original_args") ?: JSONObject().also {
+            first.put("original_args", it)
+        }
+        val upstreamModelMeta = readUpstreamModelMeta(first, originalArgs)
+
+        val modelId = readStringField(first, originalArgs, taskData, "model_id", upstreamModelMeta)
+            ?: readStringField(first, originalArgs, taskData, "model", upstreamModelMeta)
+            ?: readStringField(first, originalArgs, taskData, "model_name", upstreamModelMeta)
+        val modelManifest = readManifest(first, originalArgs, taskData, upstreamModelMeta)
+        val modelStoreDir = readStringField(first, originalArgs, taskData, "model_store_dir", upstreamModelMeta)
+        val explicitModelBaseUrl = readStringField(first, originalArgs, taskData, "model_base_url", upstreamModelMeta)
+        val modelBaseUrl = explicitModelBaseUrl ?: deriveDefaultModelBaseUrl()
+        val workerCacheDir = readStringField(first, originalArgs, taskData, "worker_model_cache_dir", upstreamModelMeta)
+
+        if (modelId.isNullOrBlank()) {
+            throw IllegalStateException("Missing model_id for tflite_partition task")
+        }
+
+        if (!first.has("model_id")) first.put("model_id", modelId)
+        if (!originalArgs.has("model_id")) originalArgs.put("model_id", modelId)
+        if (modelManifest != null && !originalArgs.has("model_manifest")) originalArgs.put("model_manifest", modelManifest)
+        if (!modelStoreDir.isNullOrBlank() && !originalArgs.has("model_store_dir")) originalArgs.put("model_store_dir", modelStoreDir)
+        if (!modelBaseUrl.isNullOrBlank() && !originalArgs.has("model_base_url")) originalArgs.put("model_base_url", modelBaseUrl)
+        if (!workerCacheDir.isNullOrBlank() && !originalArgs.has("worker_model_cache_dir")) originalArgs.put("worker_model_cache_dir", workerCacheDir)
+
+        if (explicitModelBaseUrl.isNullOrBlank() && !modelBaseUrl.isNullOrBlank()) {
+            Log.i(TAG, "model_base_url missing in task payload; using default $modelBaseUrl")
+        }
+
+        val resolved = try {
+            modelRepository.resolvePartition(
+                ModelRepository.ResolveRequest(
+                    modelId = modelId,
+                    partitionIdx = idx,
+                    modelManifest = modelManifest,
+                    modelStoreDir = modelStoreDir,
+                    modelBaseUrl = modelBaseUrl,
+                    workerModelCacheDir = workerCacheDir
+                )
+            )
+        } catch (e: Exception) {
+            val elapsed = SystemClock.elapsedRealtime() - started
+            throw IllegalStateException("Model resolution failed (model_id=$modelId, partition_idx=$idx, model_load_ms=$elapsed): ${e.message}")
+        }
+
+        Log.i(TAG, "Model resolved: ${resolved.file.absolutePath}, source=${resolved.source}, cacheHit=${resolved.cacheHit}, downloadMs=${resolved.downloadMs}")
+
+        // Provide local model path aliases for updated Python runtime loaders.
+        val localPath = resolved.file.absolutePath
+        first.put("local_model_path", localPath)
+        first.put("model_local_path", localPath)
+        originalArgs.put("local_model_path", localPath)
+        originalArgs.put("model_local_path", localPath)
+
+        val telemetry = JSONObject()
+            .put("model_source", resolved.source.name.lowercase())
+            .put("cache_hit", resolved.cacheHit)
+            .put("model_load_ms", resolved.modelLoadMs)
+        if (resolved.downloadMs != null) {
+            telemetry.put("download_ms", resolved.downloadMs)
+        }
+
+        return TflitePreparationResult(taskArgs = rootArray.toString(), telemetry = telemetry)
+    }
+
+    private fun readManifest(
+        first: JSONObject,
+        originalArgs: JSONObject,
+        taskData: JSONObject?,
+        upstreamModelMeta: JSONObject?
+    ): JSONObject? {
+        val candidates = listOf(
+            first.opt("model_manifest"),
+            originalArgs.opt("model_manifest"),
+            taskData?.opt("model_manifest"),
+            upstreamModelMeta?.opt("model_manifest"),
+            upstreamModelMeta?.opt("manifest")
+        )
+        for (candidate in candidates) {
+            when (candidate) {
+                is JSONObject -> return candidate
+                is String -> {
+                    val trimmed = candidate.trim()
+                    if (trimmed.startsWith("{")) {
+                        try {
+                            return JSONObject(trimmed)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun readStringField(
+        first: JSONObject,
+        originalArgs: JSONObject,
+        taskData: JSONObject?,
+        key: String,
+        upstreamModelMeta: JSONObject? = null
+    ): String? {
+        val v1 = first.optString(key, "").trim()
+        if (v1.isNotBlank()) return v1
+        val v2 = originalArgs.optString(key, "").trim()
+        if (v2.isNotBlank()) return v2
+        val v3 = taskData?.optString(key, "")?.trim().orEmpty()
+        if (v3.isNotBlank()) return v3
+        val v4 = upstreamModelMeta?.optString(key, "")?.trim().orEmpty()
+        return v4.ifBlank { null }
+    }
+
+    private fun readUpstreamModelMeta(first: JSONObject, originalArgs: JSONObject): JSONObject? {
+        val upstreamResults = first.optJSONObject("upstream_results") ?: return null
+        if (upstreamResults.length() == 0) return null
+
+        val streamId = if (originalArgs.has("stream_id")) originalArgs.optInt("stream_id", -1) else -1
+        var firstObj: JSONObject? = null
+        val keys = upstreamResults.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val obj = upstreamResults.optJSONObject(key) ?: continue
+            if (firstObj == null) firstObj = obj
+            if (streamId >= 0 && obj.optInt("stream_id", Int.MIN_VALUE) == streamId) {
+                return obj
+            }
+        }
+        return firstObj
+    }
+
+    fun handleLowStorageEvent() {
+        processorScope.launch {
+            try {
+                modelRepository.cleanupForLowStorage()
+            } catch (e: Exception) {
+                Log.w(TAG, "Model cache low-storage cleanup failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun normalizeAndValidateResult(rawResult: Any?, stageInfo: StageInfo, modelTelemetry: JSONObject?): JSONObject {
         return try {
             val resultObj = when (rawResult) {
                 null -> JSONObject()
@@ -616,15 +871,50 @@ class TaskProcessor(private val context: Context) {
             }
 
             if (resultObj.has("error")) {
-                return JSONObject().put("status", "error").put("error", resultObj.optString("error", "Task returned error"))
+                val baseError = resultObj.optString("error", "Task returned error")
+                val diagnostics = mutableListOf<String>()
+
+                val backendUsed = resultObj.optString("backend_used", "")
+                if (backendUsed.isNotBlank()) diagnostics.add("backend_used=$backendUsed")
+
+                if (resultObj.has("stream_id")) diagnostics.add("stream_id=${resultObj.opt("stream_id")}")
+                if (resultObj.has("partition_idx")) diagnostics.add("partition_idx=${resultObj.opt("partition_idx")}")
+                val modelId = resultObj.optString("model_id", "")
+                if (modelId.isNotBlank()) diagnostics.add("model_id=$modelId")
+
+                val traceArray = resultObj.optJSONArray("trace")
+                if (traceArray != null) {
+                    diagnostics.add("trace_len=${traceArray.length()}")
+                    if (traceArray.length() > 0) {
+                        val traceHead = (0 until minOf(3, traceArray.length()))
+                            .mapNotNull { idx -> traceArray.optString(idx, null) }
+                            .joinToString(" | ")
+                        if (traceHead.isNotBlank()) diagnostics.add("trace_head=$traceHead")
+                    }
+                }
+
+                if (modelTelemetry != null) {
+                    diagnostics.add("model_source=${modelTelemetry.optString("model_source", "unknown")}")
+                    diagnostics.add("cache_hit=${modelTelemetry.optBoolean("cache_hit", false)}")
+                    diagnostics.add("model_load_ms=${modelTelemetry.optLong("model_load_ms", 0L)}")
+                }
+
+                val enriched = if (diagnostics.isNotEmpty()) {
+                    "$baseError [${diagnostics.joinToString(", ")}]"
+                } else {
+                    baseError
+                }
+
+                return JSONObject().put("status", "error").put("error", enriched)
             }
 
             if (stageInfo.stageName == "tflite_partition") {
-                // The stage-0 payload already carries model blobs; passing tflite_models through
-                // every partition result can exceed backend/WebSocket limits and block next stages.
+                // Never return model blobs from Android workers.
                 if (resultObj.has("tflite_models")) {
                     resultObj.remove("tflite_models")
                 }
+                resultObj.remove("tflite_b64")
+                resultObj.remove("tflite_b64_str")
 
                 if (!resultObj.has("partition_idx")) {
                     stageInfo.partitionIdx?.let { resultObj.put("partition_idx", it) }
@@ -633,10 +923,37 @@ class TaskProcessor(private val context: Context) {
                     return JSONObject().put("status", "error").put("error", "Malformed tflite_partition result: requires partition_idx and output_tensor")
                 }
 
+                if (modelTelemetry != null) {
+                    resultObj.put("model_source", modelTelemetry.optString("model_source", "unknown"))
+                    resultObj.put("cache_hit", modelTelemetry.optBoolean("cache_hit", false))
+                    resultObj.put("model_load_ms", modelTelemetry.optLong("model_load_ms", 0L))
+                    if (modelTelemetry.has("download_ms")) {
+                        resultObj.put("download_ms", modelTelemetry.optLong("download_ms", 0L))
+                    }
+                    if (modelTelemetry.has("model_load_error")) {
+                        resultObj.put("model_load_error", modelTelemetry.optString("model_load_error", ""))
+                    }
+                }
+
                 val tensorObj = resultObj.optJSONObject("output_tensor")
                 val dataB64 = tensorObj?.optString("data_b64", "") ?: ""
                 if (dataB64.isNotEmpty() && dataB64.length > MAX_OUTPUT_TENSOR_B64_CHARS) {
-                    return JSONObject().put("status", "error").put("error", "Tensor payload too large (${dataB64.length} chars)")
+                    val uploadResult = uploadLargeTensorAndGetUrl(dataB64, stageInfo.partitionIdx)
+                    val uploadedUrl = uploadResult.fileUrl
+                        ?: return JSONObject().put("status", "error")
+                            .put(
+                                "error",
+                                "Tensor payload too large (${dataB64.length} chars) and upload to local HTTP server failed: " +
+                                    (uploadResult.error ?: "unknown upload error")
+                            )
+
+                    tensorObj?.apply {
+                        remove("data")
+                        remove("data_b64")
+                        put("file_url", uploadedUrl)
+                        put("transport", "http_url")
+                    }
+                    resultObj.put("tensor_offloaded", true)
                 }
             }
 
@@ -644,6 +961,79 @@ class TaskProcessor(private val context: Context) {
         } catch (e: Exception) {
             JSONObject().put("status", "error").put("error", "Failed to normalize result: ${e.message}")
         }
+    }
+
+    private fun uploadLargeTensorAndGetUrl(dataB64: String, partitionIdx: Int?): TensorUploadResult {
+        val foremanIp = configManager.getForemanIP().trim()
+        if (foremanIp.isEmpty()) {
+            Log.w(TAG, "Cannot offload tensor: Foreman IP is not configured")
+            return TensorUploadResult(fileUrl = null, error = "Foreman IP is not configured")
+        }
+
+        val uploadUrl = "http://$foremanIp:$DEFAULT_TENSOR_UPLOAD_PORT$TENSOR_UPLOAD_PATH"
+        val suffix = partitionIdx?.toString() ?: "unknown"
+        val tempFile = File(context.cacheDir, "tensor_${System.currentTimeMillis()}_${suffix}.npy")
+
+        return try {
+            val bytes = Base64.decode(dataB64, Base64.DEFAULT)
+            tempFile.writeBytes(bytes)
+
+            val filePart = tempFile.asRequestBody("application/octet-stream".toMediaTypeOrNull())
+            val multipartBody = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", tempFile.name, filePart)
+                .build()
+
+            val request = Request.Builder()
+                .url(uploadUrl)
+                .post(multipartBody)
+                .build()
+
+            tensorUploadClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Tensor upload failed: HTTP ${response.code} (${response.message})")
+                    return TensorUploadResult(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> HTTP ${response.code} (${response.message})"
+                    )
+                }
+
+                val body = response.body?.string().orEmpty()
+                if (body.isBlank()) {
+                    Log.w(TAG, "Tensor upload failed: empty response body")
+                    return TensorUploadResult(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> empty response body"
+                    )
+                }
+
+                val json = JSONObject(body)
+                val fileUrl = json.optString("file_url", "").trim()
+                if (fileUrl.isBlank()) {
+                    Log.w(TAG, "Tensor upload response missing file_url: $body")
+                    TensorUploadResult(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> response missing file_url (body=${body.take(300)})"
+                    )
+                } else {
+                    TensorUploadResult(fileUrl = fileUrl, error = null)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Tensor upload exception: ${e.message}")
+            TensorUploadResult(
+                fileUrl = null,
+                error = "POST $uploadUrl -> ${e.javaClass.simpleName}: ${e.message ?: "unknown exception"}"
+            )
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private fun deriveDefaultModelBaseUrl(): String? {
+        val foremanIp = configManager.getForemanIP().trim()
+        if (foremanIp.isBlank()) return null
+        return "http://$foremanIp:$DEFAULT_MODEL_ARTIFACT_HTTP_PORT$DEFAULT_MODEL_STORE_HTTP_PREFIX"
     }
     
     /**

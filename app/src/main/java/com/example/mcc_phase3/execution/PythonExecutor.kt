@@ -51,6 +51,12 @@ class PythonExecutor(private val context: Context) {
     private var builtinsModule: PyObject? = null
     private var jsonModule: PyObject? = null
     private var base64Module: PyObject? = null
+
+    data class TfliteBackendProbe(
+        val available: Boolean,
+        val backend: String,
+        val details: String
+    )
     
     /**
      * Set the checkpoint handler for progress updates during Python execution
@@ -172,6 +178,73 @@ print("[Android Worker] Checkpoint capture disabled")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize Python environment", e)
                 false
+            }
+        }
+    }
+
+    /**
+     * Probe whether a real TFLite backend is available in the current Chaquopy runtime.
+     * Prefers `tflite_runtime`, then falls back to `tensorflow.lite`.
+     */
+    suspend fun probeTfliteBackend(): TfliteBackendProbe {
+        return withContext(Dispatchers.IO) {
+            if (!isInitialized.get()) {
+                val initialized = initialize()
+                if (!initialized) {
+                    return@withContext TfliteBackendProbe(
+                        available = false,
+                        backend = "none",
+                        details = "Python initialization failed"
+                    )
+                }
+            }
+
+            val py = pythonInstance
+            if (py == null) {
+                return@withContext TfliteBackendProbe(
+                    available = false,
+                    backend = "none",
+                    details = "Python instance is null"
+                )
+            }
+
+            var tfliteRuntimeError: String? = null
+            try {
+                val tfliteModule = py.getModule("tflite_runtime.interpreter")
+                val modulePath = tfliteModule.get("__file__")?.toString() ?: "tflite_runtime loaded"
+                return@withContext TfliteBackendProbe(
+                    available = true,
+                    backend = "tflite_runtime",
+                    details = modulePath
+                )
+            } catch (e: Exception) {
+                tfliteRuntimeError = "${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+            }
+
+            return@withContext try {
+                val tfModule = py.getModule("tensorflow")
+                val liteNamespace = tfModule.get("lite")
+                val interpreter = liteNamespace?.get("Interpreter")
+                if (interpreter == null) {
+                    TfliteBackendProbe(
+                        available = false,
+                        backend = "none",
+                        details = "tflite_runtime=$tfliteRuntimeError | tensorflow.lite: Interpreter symbol missing"
+                    )
+                } else {
+                    val version = tfModule.get("__version__")?.toString() ?: "unknown"
+                    TfliteBackendProbe(
+                        available = true,
+                        backend = "tensorflow.lite",
+                        details = "tensorflow=$version"
+                    )
+                }
+            } catch (e: Exception) {
+                TfliteBackendProbe(
+                    available = false,
+                    backend = "none",
+                    details = "tflite_runtime=$tfliteRuntimeError | tensorflow.lite=${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+                )
             }
         }
     }
@@ -2116,26 +2189,14 @@ if '_deserialize_tensor' not in globals():
             return arr.reshape(obj.get('shape')) if obj.get('shape') else arr
 
         return obj.get('data', obj.get('data_b64', obj))
-
-if '_tflite_interpreter_cache' not in globals():
-    _tflite_interpreter_cache = {}
-
-if '_get_or_create_tflite_interpreter' not in globals():
-    def _get_or_create_tflite_interpreter(tflite_b64_str, interp_cls, tflite_bytes):
-        import hashlib
-        key = hashlib.sha256(tflite_b64_str.encode('utf-8')).hexdigest()
-        cached = _tflite_interpreter_cache.get(key)
-        if cached is not None:
-            return cached
-        interp = interp_cls(model_content=tflite_bytes)
-        _tflite_interpreter_cache[key] = interp
-        return interp
 """.trimIndent() + "\n"
             val sanitizedCode = sanitizeDynamicPythonCode(funcCode)
             val codeWithImports = importPrefix + helperFallbackPrefix + sanitizedCode
 
-            // Execute the function code — single-dict exec makes globals == locals
-            builtinsModule?.callAttr("exec", codeWithImports, execGlobals)
+            // Execute the function code — single-dict exec makes globals == locals.
+            // If payload still contains a malformed single-quoted f-string, recover once by
+            // rewriting only the reported failing line to a triple-quoted f-string.
+            execWithFStringRecovery(codeWithImports, execGlobals)
             
             // Save the reference so pause/resume/kill can target the same namespace
             execGlobalsRef.set(execGlobals)
@@ -2212,13 +2273,6 @@ if '_get_or_create_tflite_interpreter' not in globals():
         // This prevents quote collisions when such expressions appear inside single-quoted f-strings.
         working = Regex("\\['([^'\\\\]+)'\\]").replace(working, "[\"$1\"]")
 
-        // Opportunistically switch direct model_content interpreter creation to cached helper.
-        // Applies to run_tflite_partition payloads which expose tflite_b64_str and tflite_bytes.
-        working = working.replace(
-            "_Interp(model_content=tflite_bytes)",
-            "_get_or_create_tflite_interpreter(tflite_b64_str, _Interp, tflite_bytes)"
-        )
-
         // Some payloads hit the JSON fallback and try to cast a base64 string to float.
         // Use indentation-safe single-line rewrites to decode binary tensor data when present.
         working = working.replace(
@@ -2277,6 +2331,65 @@ if '_get_or_create_tflite_interpreter' not in globals():
         return sanitizedCode
     }
 
+    private fun execWithFStringRecovery(code: String, execGlobals: PyObject?) {
+        try {
+            builtinsModule?.callAttr("exec", code, execGlobals)
+            return
+        } catch (e: Exception) {
+            val msg = e.message ?: ""
+            val lineNo = parseSyntaxErrorLineNumber(msg)
+            if (!msg.contains("f-string", ignoreCase = true) || lineNo == null) {
+                throw e
+            }
+
+            val repaired = repairSingleQuotedFStringAtLine(code, lineNo)
+            if (repaired == code) {
+                throw e
+            }
+
+            val repairedLine = repaired.lines().getOrNull(lineNo - 1)?.take(300) ?: "<missing>"
+            Log.w(TAG, "Retrying exec after f-string repair at line=$lineNo: $repairedLine")
+            builtinsModule?.callAttr("exec", repaired, execGlobals)
+        }
+    }
+
+    private fun parseSyntaxErrorLineNumber(message: String): Int? {
+        val m = Regex("line\\s+(\\d+)", RegexOption.IGNORE_CASE).find(message) ?: return null
+        return m.groupValues.getOrNull(1)?.toIntOrNull()
+    }
+
+    private fun repairSingleQuotedFStringAtLine(code: String, lineNo: Int): String {
+        val lines = code.lines().toMutableList()
+        val idx = lineNo - 1
+        if (idx !in lines.indices) return code
+
+        val original = lines[idx]
+        val repaired = convertAnySingleQuotedFStringLine(original)
+        if (repaired == original) return code
+
+        lines[idx] = repaired
+        return lines.joinToString("\n")
+    }
+
+    private fun convertAnySingleQuotedFStringLine(line: String): String {
+        // Convert prefixes like f'..', rf'..', fr'..', F'..' to triple-quoted variants.
+        // This avoids quote collisions inside {...} expressions.
+        val pattern = Regex("(?i)([rubf]{0,3}f[rub]{0,3})'(.+)'")
+        val m = pattern.find(line) ?: return line
+
+        val prefix = m.groupValues[1]
+        val body = m.groupValues[2]
+        val whole = m.value
+
+        val replacement = when {
+            !body.contains("\"\"\"") -> "$prefix\"\"\"$body\"\"\""
+            !body.contains("'''") -> "$prefix'''$body'''"
+            else -> return line
+        }
+
+        return line.replace(whole, replacement)
+    }
+
     private fun convertSingleQuotedFPrintLine(line: String): String {
         val marker = "print(f'"
         val start = line.indexOf(marker)
@@ -2289,7 +2402,16 @@ if '_get_or_create_tflite_interpreter' not in globals():
         val body = line.substring(start + marker.length, end)
         val suffix = line.substring(end + 2)
 
-        return "$prefix" + "print(f\"$body\")" + suffix
+        // Use a triple-quoted f-string to avoid quote-collisions inside {...} expressions.
+        // Example: print(f'... {obj.get("k")} ...') stays valid after rewrite.
+        val tripleDouble = "\"\"\""
+        val tripleSingle = "'''"
+
+        return when {
+            !body.contains(tripleDouble) -> "$prefix" + "print(f\"\"\"$body\"\"\")" + suffix
+            !body.contains(tripleSingle) -> "$prefix" + "print(f'''$body''')" + suffix
+            else -> line
+        }
     }
     
     /**
