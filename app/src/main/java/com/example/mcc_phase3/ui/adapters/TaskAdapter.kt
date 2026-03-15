@@ -1,5 +1,6 @@
 package com.example.mcc_phase3.ui.adapters
 
+import android.content.res.ColorStateList
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -7,6 +8,7 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.example.mcc_phase3.R
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.progressindicator.LinearProgressIndicator
 
 data class TaskItem(
@@ -15,11 +17,14 @@ data class TaskItem(
     val status: String,
     val progress: Int,
     val executionTime: String,
-    val workType: String = "Other"
+    val workType: String = "Other",
+    val isPaused: Boolean = false
 )
 
-class TaskAdapter(private val tasks: MutableList<TaskItem>) : 
-    RecyclerView.Adapter<TaskAdapter.TaskViewHolder>() {
+class TaskAdapter(
+    private val tasks: MutableList<TaskItem>,
+    private var onPauseResumeClick: ((taskId: String, currentlyPaused: Boolean) -> Unit)? = null
+) : RecyclerView.Adapter<TaskAdapter.TaskViewHolder>() {
 
     class TaskViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val taskName: TextView = view.findViewById(R.id.task_name)
@@ -30,6 +35,11 @@ class TaskAdapter(private val tasks: MutableList<TaskItem>) :
         val executionTime: TextView = view.findViewById(R.id.execution_time)
         val taskIcon: ImageView = view.findViewById(R.id.task_icon)
         val workTypeChip: TextView = view.findViewById(R.id.work_type_chip)
+        val pauseResumeButton: MaterialButton = view.findViewById(R.id.pause_resume_button)
+    }
+
+    fun setOnPauseResumeClickListener(listener: (taskId: String, currentlyPaused: Boolean) -> Unit) {
+        onPauseResumeClick = listener
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): TaskViewHolder {
@@ -43,7 +53,6 @@ class TaskAdapter(private val tasks: MutableList<TaskItem>) :
         
         holder.taskName.text = task.name
         holder.taskId.text = "ID: ${task.id}"
-        holder.taskStatus.text = task.status
         holder.progressBar.progress = task.progress
         holder.progressText.text = "${task.progress}%"
         holder.executionTime.text = task.executionTime
@@ -66,27 +75,49 @@ class TaskAdapter(private val tasks: MutableList<TaskItem>) :
                 else                 -> R.color.text_secondary
             }
         )
-        when (task.status.lowercase()) {
-            "running", "assigned" -> {
-                holder.taskStatus.setTextColor(context.getColor(R.color.success))
-                holder.taskStatus.backgroundTintList = context.getColorStateList(R.color.success)
-                holder.taskIcon.setColorFilter(context.getColor(R.color.success))
-            }
-            "pending" -> {
+
+        // Status badge + icon colour driven by isPaused
+        val displayStatus = if (task.isPaused) "Paused" else task.status
+        holder.taskStatus.text = displayStatus
+
+        when {
+            task.isPaused -> {
                 holder.taskStatus.setTextColor(context.getColor(R.color.warning))
                 holder.taskStatus.backgroundTintList = context.getColorStateList(R.color.warning)
                 holder.taskIcon.setColorFilter(context.getColor(R.color.warning))
             }
-            "completed" -> {
+            task.status.lowercase() in listOf("running", "assigned") -> {
+                holder.taskStatus.setTextColor(context.getColor(R.color.success))
+                holder.taskStatus.backgroundTintList = context.getColorStateList(R.color.success)
+                holder.taskIcon.setColorFilter(context.getColor(R.color.success))
+            }
+            task.status.lowercase() == "pending" -> {
+                holder.taskStatus.setTextColor(context.getColor(R.color.warning))
+                holder.taskStatus.backgroundTintList = context.getColorStateList(R.color.warning)
+                holder.taskIcon.setColorFilter(context.getColor(R.color.warning))
+            }
+            task.status.lowercase() == "completed" -> {
                 holder.taskStatus.setTextColor(context.getColor(R.color.info))
                 holder.taskStatus.backgroundTintList = context.getColorStateList(R.color.info)
                 holder.taskIcon.setColorFilter(context.getColor(R.color.info))
             }
-            "failed" -> {
+            task.status.lowercase() == "failed" -> {
                 holder.taskStatus.setTextColor(context.getColor(R.color.error))
                 holder.taskStatus.backgroundTintList = context.getColorStateList(R.color.error)
                 holder.taskIcon.setColorFilter(context.getColor(R.color.error))
             }
+        }
+
+        // Pause / Resume toggle button
+        if (task.isPaused) {
+            holder.pauseResumeButton.text = "Resume"
+            holder.pauseResumeButton.backgroundTintList = ColorStateList.valueOf(context.getColor(R.color.success))
+        } else {
+            holder.pauseResumeButton.text = "Pause"
+            holder.pauseResumeButton.backgroundTintList = ColorStateList.valueOf(context.getColor(R.color.warning))
+        }
+        holder.pauseResumeButton.setOnClickListener {
+            onPauseResumeClick?.invoke(task.id, task.isPaused)
         }
     }
 

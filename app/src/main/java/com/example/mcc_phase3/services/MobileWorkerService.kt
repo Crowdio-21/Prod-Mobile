@@ -325,6 +325,23 @@ class MobileWorkerService : Service() {
         }
     }
 
+    // ── Task control (pause / resume / kill) ────────────────────────
+
+    /** Pause the currently running Python task. */
+    fun pauseCurrentTask() {
+        taskProcessor.pauseCurrentTask()
+    }
+
+    /** Resume a paused Python task. */
+    fun resumeCurrentTask() {
+        taskProcessor.resumeCurrentTask()
+    }
+
+    /** Kill (cancel) the currently running Python task. */
+    fun killCurrentTask() {
+        taskProcessor.killCurrentTask()
+    }
+
     /**
      * Check if worker is running
      */

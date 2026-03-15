@@ -59,11 +59,18 @@ class TaskProcessor(private val context: Context) {
     private val currentTaskId = AtomicReference<String?>(null)
     private val currentJobId = AtomicReference<String?>(null)
     private val isTaskRunning = AtomicBoolean(false)
+    private val isTaskPaused = AtomicBoolean(false)
     private val taskStartTime = AtomicReference<Long?>(null)
     
     // Real-time progress tracking (independent of checkpointing)
     private val currentProgress = AtomicReference<Float>(0f)
     private val lastProgressUpdate = AtomicReference<Long>(0L)
+
+    // Pause-aware progress: caches last reported value so the bar doesn't drop to 0% when paused
+    private val lastKnownProgress = AtomicReference<Float>(0f)
+    // Tracks when the current pause started, and cumulative ms spent paused (for time-based fallback)
+    private val pausedAtTime = AtomicReference<Long?>(null)
+    private val totalPausedMs = AtomicReference<Long>(0L)
 
     // Work type detected from incoming func_code
     private val currentWorkType = AtomicReference<String>("Other")
@@ -188,6 +195,9 @@ class TaskProcessor(private val context: Context) {
             isTaskRunning.set(true)
             taskStartTime.set(System.currentTimeMillis())
             currentProgress.set(0f)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
             Log.d(TAG, "Task $taskId started at ${taskStartTime.get()}")
             EventLogger.info(EventLogger.Categories.TASK, "Task $taskId started (Job: $jobId)")
             NotificationHelper.notifyTaskAssigned(context, taskId, jobId)
@@ -305,6 +315,9 @@ class TaskProcessor(private val context: Context) {
                 isTaskRunning.set(false)
                 taskStartTime.set(null)
                 currentProgress.set(0f)
+                lastKnownProgress.set(0f)
+                pausedAtTime.set(null)
+                totalPausedMs.set(0L)
                 currentWorkType.set("Other")
             }
             
@@ -317,6 +330,9 @@ class TaskProcessor(private val context: Context) {
             isTaskRunning.set(false)
             taskStartTime.set(null)
             currentProgress.set(0f)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
             currentWorkType.set("Other")
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
@@ -809,19 +825,29 @@ class TaskProcessor(private val context: Context) {
         }
         
         // 3. Fallback to time-based progress if no other source
-        if (progressPercent <= 0f && isBusy && startTime != null) {
-            val elapsedMs = System.currentTimeMillis() - startTime
+        //    Skip when paused – the task isn't making progress, so the bar should freeze.
+        if (progressPercent <= 0f && isBusy && !isTaskPaused.get() && startTime != null) {
+            val elapsedMs = System.currentTimeMillis() - startTime - totalPausedMs.get()
             // Simulate progress: 0-99% spread evenly across the full task timeout window.
-            // Aligning with TASK_TIMEOUT_MS prevents the value from freezing at 99%
-            // for long-running tasks (old 60-second denominator was too short).
             progressPercent = ((elapsedMs / TASK_TIMEOUT_MS.toFloat()) * 99f).coerceIn(0f, 99f)
             Log.d(TAG, "Using time-based fallback progress: $progressPercent% (elapsed: ${elapsedMs}ms)")
+        }
+
+        // When paused and no live source reported a value, return the cached progress
+        if (isTaskPaused.get() && progressPercent <= 0f) {
+            progressPercent = lastKnownProgress.get()
+        }
+
+        // Cache the latest non-zero progress so we can show it while paused
+        if (progressPercent > 0f) {
+            lastKnownProgress.set(progressPercent)
         }
         
         Log.d(TAG, "getCurrentTaskStatus - busy: $isBusy, taskId: $taskId, progress: $progressPercent%")
         
         return mapOf<String, Any>(
             "is_busy" to isBusy,
+            "is_paused" to isTaskPaused.get(),
             "current_task_id" to taskId,
             "current_job_id" to jobId,
             "python_ready" to pythonExecutor.isReady(),
@@ -924,6 +950,57 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
+     * Pause the currently running task.
+     * Sets the cooperative `paused` flag inside the Python exec namespace.
+     */
+    fun pauseCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "pauseCurrentTask: no task running")
+            return
+        }
+        pythonExecutor.pauseExecution()
+        isTaskPaused.set(true)
+        pausedAtTime.set(System.currentTimeMillis())
+        Log.d(TAG, "Task ${currentTaskId.get()} paused")
+    }
+
+    /**
+     * Resume a paused task.
+     */
+    fun resumeCurrentTask() {
+        if (!isTaskPaused.get()) {
+            Log.w(TAG, "resumeCurrentTask: task is not paused")
+            return
+        }
+        // Accumulate paused duration so time-based fallback stays accurate
+        val pauseStart = pausedAtTime.getAndSet(null)
+        if (pauseStart != null) {
+            totalPausedMs.set(totalPausedMs.get() + (System.currentTimeMillis() - pauseStart))
+        }
+        pythonExecutor.resumeExecution()
+        isTaskPaused.set(false)
+        Log.d(TAG, "Task ${currentTaskId.get()} resumed")
+    }
+
+    /**
+     * Kill (cancel) the currently running task.
+     */
+    fun killCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "killCurrentTask: no task running")
+            return
+        }
+        // If the task is paused, resume it first so the Python `while paused`
+        // loop exits and the code reaches the `if killed` check.
+        if (isTaskPaused.get()) {
+            pythonExecutor.resumeExecution()
+        }
+        pythonExecutor.killExecution()
+        isTaskPaused.set(false)
+        Log.d(TAG, "Task ${currentTaskId.get()} killed")
+    }
+
+    /**
      * Cleanup resources
      */
     fun cleanup() {
@@ -933,6 +1010,10 @@ class TaskProcessor(private val context: Context) {
             processorScope.cancel()
             currentTaskId.set(null)
             isTaskRunning.set(false)
+            isTaskPaused.set(false)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
             isInitialized.set(false)
             pythonExecutor.cleanup()
             Log.d(TAG, " TaskProcessor cleaned up")

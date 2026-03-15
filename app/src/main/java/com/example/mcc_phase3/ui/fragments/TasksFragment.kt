@@ -35,18 +35,18 @@ class TasksFragment : Fragment() {
     }
 
     private lateinit var recyclerView: RecyclerView
-    private lateinit var activateButton: MaterialButton
-    private lateinit var pauseButton: MaterialButton
+    private lateinit var connectButton: MaterialButton
+    private lateinit var disconnectButton: MaterialButton
     private lateinit var workerStatusText: MaterialTextView
     private lateinit var statusIndicator: View
     private lateinit var emptyStateCard: View
     private lateinit var debugInfoText: MaterialTextView
     private lateinit var taskAdapter: TaskAdapter
     
-    private var isWorkerActive = false
+    private var isWorkerConnected = false
     private val progressUpdateScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     
-    private var mobileWorkerService:  MobileWorkerService? = null
+    private var mobileWorkerService: MobileWorkerService? = null
     private var isBound = false
     
     private val serviceConnection = object : ServiceConnection {
@@ -97,8 +97,8 @@ class TasksFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         
         recyclerView = view.findViewById(R.id.tasks_recycler_view)
-        activateButton = view.findViewById(R.id.activate_worker_button)
-        pauseButton = view.findViewById(R.id.pause_worker_button)
+        connectButton = view.findViewById(R.id.connect_button)
+        disconnectButton = view.findViewById(R.id.disconnect_button)
         workerStatusText = view.findViewById(R.id.worker_status_text)
         statusIndicator = view.findViewById(R.id.status_indicator)
         emptyStateCard = view.findViewById(R.id.empty_state_card)
@@ -117,6 +117,14 @@ class TasksFragment : Fragment() {
     private fun setupRecyclerView() {
         recyclerView.layoutManager = LinearLayoutManager(requireContext())
         taskAdapter = TaskAdapter(mutableListOf())
+        taskAdapter.setOnPauseResumeClickListener { _, currentlyPaused ->
+            val service = mobileWorkerService ?: return@setOnPauseResumeClickListener
+            if (currentlyPaused) {
+                service.resumeCurrentTask()
+            } else {
+                service.pauseCurrentTask()
+            }
+        }
         recyclerView.adapter = taskAdapter
     }
     
@@ -127,6 +135,11 @@ class TasksFragment : Fragment() {
                 try {
                     val service = mobileWorkerService
                     if (service != null && service.isWorkerRunning()) {
+                        // Sync connection UI if service is already running
+                        if (!isWorkerConnected && isAdded && view != null) {
+                            isWorkerConnected = true
+                            updateConnectionUI()
+                        }
                         // Get current task status from service
                         val status = service.getWorkerStatus()
                         
@@ -152,7 +165,8 @@ class TasksFragment : Fragment() {
                                 """.trimIndent()
                             }
                             
-                            Log.d(TAG, "Task status - ID: $currentTaskId, Progress: $progressPercent%, Busy: $isBusy")
+                            val isPaused = taskStatus?.get("is_paused") as? Boolean ?: false
+                            Log.d(TAG, "Task status - ID: $currentTaskId, Progress: $progressPercent%, Busy: $isBusy, Paused: $isPaused")
                             
                             if (!currentTaskId.isNullOrEmpty() && isBusy) {
                                 // Show current task with real progress from checkpoint handler
@@ -163,10 +177,11 @@ class TasksFragment : Fragment() {
                                     TaskItem(
                                         id = currentTaskId,
                                         name = "Task $currentTaskId",
-                                        status = "Running",
+                                        status = if (isPaused) "Paused" else "Running",
                                         progress = progress,
                                         executionTime = executionTime,
-                                        workType = workType
+                                        workType = workType,
+                                        isPaused = isPaused
                                     )
                                 )
                                 
@@ -175,12 +190,6 @@ class TasksFragment : Fragment() {
                                     emptyStateCard.visibility = View.GONE
                                     recyclerView.visibility = View.VISIBLE
                                     Log.d(TAG, "Displaying task with ${progress}% progress")
-                                    
-                                    // Update worker status
-                                    if (!isWorkerActive) {
-                                        isWorkerActive = true
-                                        updateWorkerStatus()
-                                    }
                                 }
                             } else {
                                 // No current task
@@ -203,9 +212,9 @@ class TasksFragment : Fragment() {
                                 Worker Running: false
                                 Status: Worker service not active
                             """.trimIndent()
-                            if (isWorkerActive) {
-                                isWorkerActive = false
-                                updateWorkerStatus()
+                            if (isWorkerConnected) {
+                                isWorkerConnected = false
+                                updateConnectionUI()
                             }
                         }
                         Log.d(TAG, "Worker not running")
@@ -223,16 +232,16 @@ class TasksFragment : Fragment() {
     }
     
     private fun setupWorkerControls() {
-        activateButton.setOnClickListener {
-            activateWorker()
+        connectButton.setOnClickListener {
+            connectWorker()
         }
         
-        pauseButton.setOnClickListener {
-            pauseWorker()
+        disconnectButton.setOnClickListener {
+            disconnectWorker()
         }
     }
     
-    private fun activateWorker() {
+    private fun connectWorker() {
         // Check for notification permission on Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             when {
@@ -276,8 +285,8 @@ class TasksFragment : Fragment() {
         
         Log.d(TAG, "Starting worker service with Foreman URL: $foremanUrl")
         
-        isWorkerActive = true
-        updateWorkerStatus()
+        isWorkerConnected = true
+        updateConnectionUI()
         
         // Start the worker service with START_WORKER action
         val intent = Intent(requireContext(), MobileWorkerService::class.java).apply {
@@ -286,12 +295,15 @@ class TasksFragment : Fragment() {
         }
         requireContext().startService(intent)
         
-        Toast.makeText(requireContext(), "Worker activated. Connecting to $foremanUrl", Toast.LENGTH_SHORT).show()
+        Toast.makeText(requireContext(), "Connecting to $foremanUrl", Toast.LENGTH_SHORT).show()
     }
     
-    private fun pauseWorker() {
-        isWorkerActive = false
-        updateWorkerStatus()
+    private fun disconnectWorker() {
+        // Kill any running task first, then close the WebSocket
+        mobileWorkerService?.killCurrentTask()
+        
+        isWorkerConnected = false
+        updateConnectionUI()
         
         // Stop the worker service with STOP_WORKER action
         val intent = Intent(requireContext(), MobileWorkerService::class.java).apply {
@@ -299,24 +311,24 @@ class TasksFragment : Fragment() {
         }
         requireContext().startService(intent)
         
-        Toast.makeText(requireContext(), "Worker paused", Toast.LENGTH_SHORT).show()
+        Toast.makeText(requireContext(), "Disconnected", Toast.LENGTH_SHORT).show()
     }
     
-    private fun updateWorkerStatus() {
-        if (isWorkerActive) {
-            workerStatusText.text = "Active - Processing tasks"
+    private fun updateConnectionUI() {
+        if (isWorkerConnected) {
+            workerStatusText.text = "Connected"
             workerStatusText.setTextColor(resources.getColor(R.color.success, null))
             statusIndicator.backgroundTintList = 
                 resources.getColorStateList(R.color.success, null)
-            activateButton.isEnabled = false
-            pauseButton.isEnabled = true
+            connectButton.isEnabled = false
+            disconnectButton.isEnabled = true
         } else {
-            workerStatusText.text = "Inactive"
+            workerStatusText.text = "Disconnected"
             workerStatusText.setTextColor(resources.getColor(R.color.text_secondary, null))
             statusIndicator.backgroundTintList = 
                 resources.getColorStateList(R.color.text_secondary, null)
-            activateButton.isEnabled = true
-            pauseButton.isEnabled = false
+            connectButton.isEnabled = true
+            disconnectButton.isEnabled = false
         }
     }
     
