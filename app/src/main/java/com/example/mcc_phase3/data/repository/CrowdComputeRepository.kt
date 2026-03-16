@@ -33,7 +33,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
     }
     
     private val apiService: ApiService = ApiClient.getApiService(context)
-    private val webSocketManager = WebSocketManager.getInstance() // ✅ Use singleton instance
+    private val webSocketManager = WebSocketManager.getInstance() // Use singleton instance
     private val deviceInfoManager = DeviceInfoManager(context) // Device information manager
     private val configManager = ConfigManager.getInstance(context) // Configuration manager
     
@@ -46,7 +46,7 @@ class CrowdComputeRepository(private val context: android.content.Context) {
             val binder = service as? MobileWorkerService.LocalBinder
             mobileWorkerService = binder?.getService()
             isServiceBound = true
-            Log.d(TAG, "✅ Connected to MobileWorkerService")
+            Log.d(TAG, "Connected to MobileWorkerService")
         }
         
         override fun onServiceDisconnected(name: ComponentName?) {

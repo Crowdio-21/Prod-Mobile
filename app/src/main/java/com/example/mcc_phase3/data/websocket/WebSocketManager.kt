@@ -38,12 +38,12 @@ class WebSocketManager private constructor() {
     }
 
     fun connect(url: String) {
-        Log.d(TAG, "🔌 connect() called with URL: $url")
+        Log.d(TAG, "connect() called with URL: $url")
         currentUrl = url
         connectionStartTime = System.currentTimeMillis()
 
         if (isConnected) {
-            Log.w(TAG, "⚠️ Already connected, disconnecting first")
+            Log.w(TAG, "Already connected, disconnecting first")
             disconnect()
         }
 
@@ -59,21 +59,21 @@ class WebSocketManager private constructor() {
                 
                 override fun onOpen(handshakedata: ServerHandshake?) {
                     val connectionTime = System.currentTimeMillis() - connectionStartTime
-                    Log.d(TAG, "✅ Connected to $url in ${connectionTime}ms")
+                    Log.d(TAG, "Connected to $url in ${connectionTime}ms")
                     isConnected = true
                     listeners.forEach { it.onConnected() }
                 }
 
                 override fun onMessage(message: String?) {
                     val msgCount = messageCounter.incrementAndGet()
-                    Log.d(TAG, "📨 Message #$msgCount received (${message?.length ?: 0} chars)")
+                    Log.d(TAG, "Message #$msgCount received (${message?.length ?: 0} chars)")
                     message?.let { msg ->
                         listeners.forEach { it.onMessage(msg) }
                     }
                 }
 
                 override fun onClose(code: Int, reason: String?, remote: Boolean) {
-                    Log.w(TAG, "🔌 Disconnected from $currentUrl (code=$code, reason=$reason, remote=$remote)")
+                    Log.w(TAG, "Disconnected from $currentUrl (code=$code, reason=$reason, remote=$remote)")
                     isConnected = false
                     listeners.forEach { it.onDisconnected() }
                     
@@ -84,12 +84,12 @@ class WebSocketManager private constructor() {
                 }
 
                 override fun onError(ex: Exception?) {
-                    Log.e(TAG, "❌ WebSocket error", ex)
+                    Log.e(TAG, "WebSocket error", ex)
                     listeners.forEach { it.onError(ex) }
                 }
             }
 
-            Log.d(TAG, "🚀 Starting WebSocket connection...")
+            Log.d(TAG, "Starting WebSocket connection...")
             webSocket?.connect()
         } catch (e: Exception) {
             Log.e(TAG, "💥 Failed to create/connect WebSocket", e)
@@ -97,7 +97,7 @@ class WebSocketManager private constructor() {
     }
 
     fun disconnect() {
-        Log.d(TAG, "🔌 disconnect() called")
+        Log.d(TAG, "disconnect() called")
         shouldReconnect = false
         reconnectJob?.cancel()
         webSocket?.close()
@@ -117,13 +117,13 @@ class WebSocketManager private constructor() {
         reconnectJob?.cancel()
         reconnectJob = CoroutineScope(Dispatchers.IO).launch {
             val delay = minOf(1000L * (1 shl reconnectAttempts), 30000L) // Exponential backoff, max 30s
-            Log.d(TAG, "🔄 Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms")
+            Log.d(TAG, "Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms")
             
             delay(delay)
             
             if (shouldReconnect && currentUrl != null) {
                 reconnectAttempts++
-                Log.d(TAG, "🔄 Attempting reconnection #$reconnectAttempts to $currentUrl")
+                Log.d(TAG, "Attempting reconnection #$reconnectAttempts to $currentUrl")
                 connect(currentUrl!!)
             }
         }
@@ -133,12 +133,12 @@ class WebSocketManager private constructor() {
         if (isConnected) {
             try {
                 webSocket?.send(message)
-                Log.d(TAG, "✅ Message sent")
+                Log.d(TAG, "Message sent")
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to send message", e)
+                Log.e(TAG, "Failed to send message", e)
             }
         } else {
-            Log.w(TAG, "⚠️ Cannot send message - not connected")
+            Log.w(TAG, "Cannot send message - not connected")
         }
     }
 

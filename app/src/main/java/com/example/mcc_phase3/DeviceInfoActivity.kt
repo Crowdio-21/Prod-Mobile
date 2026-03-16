@@ -57,7 +57,7 @@ class DeviceInfoActivity : AppCompatActivity() {
      * Collect comprehensive device information
      */
     private fun collectDeviceInfo() {
-        outputTextView.text = "🔄 Collecting device information..."
+        outputTextView.text = "Collecting device information..."
         
         lifecycleScope.launch {
             try {
@@ -68,16 +68,16 @@ class DeviceInfoActivity : AppCompatActivity() {
                     val formattedInfo = DeviceInfoFormatter.formatDeviceMetrics(metrics)
                     outputTextView.text = formattedInfo
                     
-                    Log.d(TAG, "✅ Device info collected successfully")
+                    Log.d(TAG, "Device info collected successfully")
                     Log.d(TAG, DeviceInfoFormatter.getBriefSummary(metrics))
                 } else {
                     val error = result.exceptionOrNull()
-                    outputTextView.text = "❌ Error collecting device information:\n${error?.message}"
-                    Log.e(TAG, "❌ Failed to collect device info", error)
+                    outputTextView.text = "Error collecting device information:\n${error?.message}"
+                    Log.e(TAG, "Failed to collect device info", error)
                 }
             } catch (e: Exception) {
-                outputTextView.text = "❌ Exception occurred:\n${e.message}"
-                Log.e(TAG, "❌ Exception in collectDeviceInfo", e)
+                outputTextView.text = "Exception occurred:\n${e.message}"
+                Log.e(TAG, "Exception in collectDeviceInfo", e)
             }
         }
     }

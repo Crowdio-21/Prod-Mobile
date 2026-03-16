@@ -165,10 +165,10 @@ class MobileWorkerActivity : AppCompatActivity() {
                         val status = taskTestResult["status"] as? String
                         if (status == "success") {
                             val result = taskTestResult["result"]
-                            Log.d(TAG, "✅ Task execution test successful: $result")
+                            Log.d(TAG, "Task execution test successful: $result")
                         } else {
                             val error = taskTestResult["message"] as? String
-                            Log.e(TAG, "❌ Task execution test failed: $error")
+                            Log.e(TAG, "Task execution test failed: $error")
                         }
                     }
                 } catch (e: Exception) {
@@ -224,7 +224,7 @@ class MobileWorkerActivity : AppCompatActivity() {
                         val workerId = workerStatus["worker_id"] as? String
                         
                         val statusText = buildString {
-                            appendLine("🔄 Worker Status:")
+                            appendLine("Worker Status:")
                             appendLine("Service Running: $isRunning")
                             appendLine("Worker ID: $workerId")
                             appendLine("WebSocket Connected: ${connection?.get("is_connected") ?: false}")
@@ -237,7 +237,7 @@ class MobileWorkerActivity : AppCompatActivity() {
                         
                         // Update stats
                         val statsText = buildString {
-                            appendLine("📊 Worker Statistics:")
+                            appendLine("Worker Statistics:")
                             appendLine("Python Version: ${pythonExecutor?.get("python_version") ?: "Unknown"}")
                             appendLine("Platform: ${pythonExecutor?.get("platform") ?: "Unknown"}")
                             appendLine("Reconnect Attempts: ${connection?.get("reconnect_attempts") ?: 0}")
@@ -279,7 +279,7 @@ class MobileWorkerActivity : AppCompatActivity() {
                         
                         // Update logs - show recent status instead of file logs
                         val logsText = buildString {
-                            appendLine("📝 Recent Status:")
+                            appendLine("Recent Status:")
                             appendLine("Last Update: ${System.currentTimeMillis()}")
                             appendLine("Worker Status: ${if (isRunning) "Running" else "Stopped"}")
                             appendLine("Python Executor: ${if (pythonExecutor?.get("initialized") == true) "Ready" else "Not Ready"}")
@@ -294,9 +294,9 @@ class MobileWorkerActivity : AppCompatActivity() {
                 }
             } else {
                 statusTextView.text = "Status: Service not connected"
-                statsTextView.text = "📊 Worker Statistics:\nNot available"
+                statsTextView.text = "Worker Statistics:\nNot available"
                 mobileInfoTextView.text = "📱 Device Information:\nNot available"
-                logsTextView.text = "📝 Recent Logs:\nNot available"
+                logsTextView.text = "Recent Logs:\nNot available"
             }
         }
     }

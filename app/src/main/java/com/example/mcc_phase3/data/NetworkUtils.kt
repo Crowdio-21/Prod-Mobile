@@ -58,10 +58,10 @@ object NetworkUtils {
             socket.connect(java.net.InetSocketAddress(host, port), CONNECTIVITY_TIMEOUT_MS.toInt())
             socket.close()
             
-            Log.d(TAG, "✅ Host $host:$port is reachable")
+            Log.d(TAG, "Host $host:$port is reachable")
             true
         } catch (e: Exception) {
-            Log.w(TAG, "❌ Host $host:$port is not reachable: ${e.message}")
+            Log.w(TAG, "Host $host:$port is not reachable: ${e.message}")
             false
         }
     }
@@ -83,10 +83,10 @@ object NetworkUtils {
             connection.disconnect()
             
             val isAccessible = responseCode in 200..399
-            Log.d(TAG, "✅ URL $url is accessible (HTTP $responseCode)")
+            Log.d(TAG, "URL $url is accessible (HTTP $responseCode)")
             isAccessible
         } catch (e: Exception) {
-            Log.w(TAG, "❌ URL $url is not accessible: ${e.message}")
+            Log.w(TAG, "URL $url is not accessible: ${e.message}")
             false
         }
     }
@@ -101,10 +101,10 @@ object NetworkUtils {
             val addresses = InetAddress.getAllByName(host)
             val ipAddresses = addresses.map { it.hostAddress }
             
-            Log.d(TAG, "✅ DNS resolution successful for $host: ${ipAddresses.joinToString(", ")}")
+            Log.d(TAG, "DNS resolution successful for $host: ${ipAddresses.joinToString(", ")}")
             ipAddresses.toList()
         } catch (e: Exception) {
-            Log.w(TAG, "❌ DNS resolution failed for $host: ${e.message}")
+            Log.w(TAG, "DNS resolution failed for $host: ${e.message}")
             emptyList()
         }
     }
@@ -119,7 +119,7 @@ object NetworkUtils {
         
         // Check general internet connectivity
         result.hasInternetConnectivity = hasInternetConnectivity(context)
-        Log.d(TAG, "📡 Internet connectivity: ${result.hasInternetConnectivity}")
+        Log.d(TAG, "Internet connectivity: ${result.hasInternetConnectivity}")
         
         if (!result.hasInternetConnectivity) {
             result.errorMessage = "No internet connectivity detected"
@@ -158,7 +158,7 @@ object NetworkUtils {
             
         } catch (e: Exception) {
             result.errorMessage = "Network diagnostic failed: ${e.message}"
-            Log.e(TAG, "❌ Network diagnostic failed", e)
+            Log.e(TAG, "Network diagnostic failed", e)
         }
         
         Log.d(TAG, "🔧 Network diagnostic completed: ${if (result.isSuccessful) "SUCCESS" else "FAILED"}")
@@ -197,11 +197,11 @@ object NetworkUtils {
         fun getSummary(): String {
             return buildString {
                 appendLine("Network Diagnostic Summary:")
-                appendLine("- Internet Connectivity: ${if (hasInternetConnectivity) "✅" else "❌"}")
-                appendLine("- DNS Resolution: ${if (resolvedAddresses.isNotEmpty()) "✅ (${resolvedAddresses.joinToString(", ")})" else "❌"}")
-                appendLine("- Host Reachability: ${if (isHostReachable) "✅" else "❌"}")
-                appendLine("- URL Accessibility: ${if (isUrlAccessible) "✅" else "❌"}")
-                appendLine("- Overall Status: ${if (isSuccessful) "✅ SUCCESS" else "❌ FAILED"}")
+                appendLine("- Internet Connectivity: ${if (hasInternetConnectivity) "[YES]" else "[NO]"}")
+                appendLine("- DNS Resolution: ${if (resolvedAddresses.isNotEmpty()) "[OK] (${resolvedAddresses.joinToString(", ")})" else "[FAILED]"}")
+                appendLine("- Host Reachability: ${if (isHostReachable) "[OK]" else "[FAILED]"}")
+                appendLine("- URL Accessibility: ${if (isUrlAccessible) "[OK]" else "[FAILED]"}")
+                appendLine("- Overall Status: ${if (isSuccessful) "SUCCESS" else "FAILED"}")
                 errorMessage?.let { appendLine("- Error: $it") }
             }
         }

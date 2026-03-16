@@ -20,6 +20,8 @@ import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.execution.PythonExecutor
 import com.example.mcc_phase3.execution.TaskProcessor
+import com.example.mcc_phase3.utils.EventLogger
+import com.example.mcc_phase3.utils.NotificationHelper
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -57,10 +59,12 @@ class MobileWorkerService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "=== MobileWorkerService Created ===")
+        EventLogger.info(EventLogger.Categories.SERVICE, "Mobile Worker Service created")
         workerIdManager = WorkerIdManager.getInstance(this)
         
-        // Create notification channel first
+        // Create notification channels
         createNotificationChannel()
+        NotificationHelper.createEventChannel(this)
         
         // Start as foreground service immediately to prevent being killed
         if (hasNotificationPermission()) {
@@ -214,12 +218,12 @@ class MobileWorkerService : Service() {
             // Initialize task processor
             taskProcessor = TaskProcessor(this)
             
-            // Initialize WebSocket client
-            webSocketClient = WorkerWebSocketClient(this)
+            // Initialize WebSocket client with shared TaskProcessor
+            webSocketClient = WorkerWebSocketClient(this, taskProcessor)
             
-            Log.d(TAG, "✅ All components initialized successfully")
+            Log.d(TAG, "All components initialized successfully (shared TaskProcessor)")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to initialize components", e)
+            Log.e(TAG, "Failed to initialize components", e)
         }
     }
 
@@ -242,6 +246,7 @@ class MobileWorkerService : Service() {
         isRunning.set(true)
         Log.d(TAG, "Starting mobile worker...")
         Log.d(TAG, "Foreman URL: $actualForemanUrl")
+        EventLogger.info(EventLogger.Categories.WORKER, "Starting worker, connecting to: $actualForemanUrl")
 
         serviceScope.launch {
             try {
@@ -254,14 +259,16 @@ class MobileWorkerService : Service() {
                 
                 if (connected) {
                     updateNotification("Mobile Worker Service", "Worker connected: $workerId")
-                    Log.d(TAG, "✅ Mobile worker started successfully")
+                    Log.d(TAG, "Mobile worker started successfully")
+                    EventLogger.success(EventLogger.Categories.WORKER, "Worker started successfully (ID: $workerId)")
                 } else {
-                    Log.e(TAG, "❌ Failed to connect to WebSocket")
+                    Log.e(TAG, "Failed to connect to WebSocket")
+                    EventLogger.error(EventLogger.Categories.WORKER, "Failed to connect to foreman")
                     updateNotification("Mobile Worker Service", "Worker running (connecting...)")
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to start worker", e)
+                Log.e(TAG, "Failed to start worker", e)
                 updateNotification("Mobile Worker Service", "Worker error: ${e.message}")
             }
         }
@@ -277,6 +284,7 @@ class MobileWorkerService : Service() {
 
         try {
             Log.d(TAG, "Stopping mobile worker...")
+            EventLogger.info(EventLogger.Categories.WORKER, "Stopping worker")
 
             // Disconnect WebSocket
             webSocketClient.disconnect()
@@ -285,6 +293,10 @@ class MobileWorkerService : Service() {
             updateNotification("Mobile Worker Service", "Worker stopped")
 
             Log.d(TAG, "✅ Mobile worker stopped successfully")
+            
+            // Stop the foreground service
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to stop worker", e)
@@ -311,6 +323,23 @@ class MobileWorkerService : Service() {
             Log.e(TAG, "Failed to get worker status", e)
             null
         }
+    }
+
+    // ── Task control (pause / resume / kill) ────────────────────────
+
+    /** Pause the currently running Python task. */
+    fun pauseCurrentTask() {
+        taskProcessor.pauseCurrentTask()
+    }
+
+    /** Resume a paused Python task. */
+    fun resumeCurrentTask() {
+        taskProcessor.resumeCurrentTask()
+    }
+
+    /** Kill (cancel) the currently running Python task. */
+    fun killCurrentTask() {
+        taskProcessor.killCurrentTask()
     }
 
     /**

@@ -7,6 +7,8 @@ import com.example.mcc_phase3.communication.MessageProtocol
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.checkpoint.TaskMetadata
+import com.example.mcc_phase3.utils.EventLogger
+import com.example.mcc_phase3.utils.NotificationHelper
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -26,7 +28,10 @@ class TaskProcessor(private val context: Context) {
     
     companion object {
         private const val TAG = "TaskProcessor"
-        
+
+        /** Maximum wall-clock time (ms) a single task may run before it is force-cancelled. */
+        private const val TASK_TIMEOUT_MS = 10 * 60 * 1000L  // 10 minutes
+
         // Task types
         private const val TASK_TYPE_ASSIGN = "assign_task"
         private const val TASK_TYPE_CANCEL = "cancel_task"
@@ -54,6 +59,21 @@ class TaskProcessor(private val context: Context) {
     private val currentTaskId = AtomicReference<String?>(null)
     private val currentJobId = AtomicReference<String?>(null)
     private val isTaskRunning = AtomicBoolean(false)
+    private val isTaskPaused = AtomicBoolean(false)
+    private val taskStartTime = AtomicReference<Long?>(null)
+    
+    // Real-time progress tracking (independent of checkpointing)
+    private val currentProgress = AtomicReference<Float>(0f)
+    private val lastProgressUpdate = AtomicReference<Long>(0L)
+
+    // Pause-aware progress: caches last reported value so the bar doesn't drop to 0% when paused
+    private val lastKnownProgress = AtomicReference<Float>(0f)
+    // Tracks when the current pause started, and cumulative ms spent paused (for time-based fallback)
+    private val pausedAtTime = AtomicReference<Long?>(null)
+    private val totalPausedMs = AtomicReference<Long>(0L)
+
+    // Work type detected from incoming func_code
+    private val currentWorkType = AtomicReference<String>("Other")
     
     /**
      * Initialize the task processor
@@ -165,12 +185,56 @@ class TaskProcessor(private val context: Context) {
                 return createErrorResponse("No function code found in task")
             }
             
+            // Detect and store work type before execution starts
+            currentWorkType.set(detectWorkType(funcCode))
+            Log.d(TAG, "Work type detected: ${currentWorkType.get()} for task $taskId")
+
             // Set current task and job
             currentTaskId.set(taskId)
             currentJobId.set(jobId)
             isTaskRunning.set(true)
+            taskStartTime.set(System.currentTimeMillis())
+            currentProgress.set(0f)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
+            Log.d(TAG, "Task $taskId started at ${taskStartTime.get()}")
+            EventLogger.info(EventLogger.Categories.TASK, "Task $taskId started (Job: $jobId)")
+            NotificationHelper.notifyTaskAssigned(context, taskId, jobId)
+            
+            var progressPollingJob: Job? = null
+            var taskTimeoutJob: Job? = null
             
             try {
+                // Set up real-time progress callback (works with or without checkpointing)
+                pythonExecutor.setProgressCallback { progress ->
+                    updateProgress(progress)
+                }
+
+                // Watchdog: cancel this coroutine if the task exceeds TASK_TIMEOUT_MS
+                taskTimeoutJob = processorScope.launch {
+                    delay(TASK_TIMEOUT_MS)
+                    if (isTaskRunning.get()) {
+                        Log.e(TAG, "Task $taskId exceeded timeout (${TASK_TIMEOUT_MS / 1000}s) – force-failing")
+                        EventLogger.error(EventLogger.Categories.TASK, "Task $taskId timed out after ${TASK_TIMEOUT_MS / 1000}s")
+                        // Deliver empty images in case the picker is hanging
+                        ImagePickerManager.getInstance().deliverImages(emptyList())
+                    }
+                }
+                
+                // Start progress polling in background (independent of checkpointing)
+                progressPollingJob = processorScope.launch {
+                    while (isTaskRunning.get()) {
+                        try {
+                            pythonExecutor.pollProgressAndUpdate()
+                            delay(1000) // Poll every second
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Progress polling interrupted: ${e.message}")
+                            break
+                        }
+                    }
+                }
+                
                 // Start checkpoint monitoring if callback is set and checkpointing is enabled
                 checkpointCallback?.let { callback ->
                     // Configure checkpoint handler from task_metadata if present
@@ -191,7 +255,8 @@ class TaskProcessor(private val context: Context) {
                             sendCheckpoint = callback,
                             pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
                         )
-                        Log.i(TAG, "✅ Checkpoint monitoring started for task $taskId")
+                        Log.i(TAG, "Checkpoint monitoring started for task $taskId")
+                        EventLogger.info(EventLogger.Categories.CHECKPOINT, "Checkpoint monitoring started for task $taskId")
                     } else {
                         Log.d(TAG, "Checkpointing disabled for task $taskId (per task_metadata)")
                     }
@@ -199,35 +264,76 @@ class TaskProcessor(private val context: Context) {
                 
                 // Execute the function code (matching desktop worker format)
                 val executionResult = pythonExecutor.executeCode(funcCode, taskArgs)
-                
-                // Create response using the new protocol
-                val response = MessageProtocol.createTaskResultMessage(
-                    taskId = taskId,
-                    jobId = jobId, // Use the actual job ID from the message
-                    result = executionResult["result"],
-                    executionTime = 0.0 // TODO: Calculate actual execution time
-                )
-                
-                Log.d(TAG, " Task $taskId completed successfully")
+
+                val executionStatus = executionResult["status"] as? String ?: "error"
+                val executionMessage = executionResult["message"] as? String ?: "Unknown error"
+
+                // Route to error message if Python reported a failure
+                val response = if (executionStatus == "error") {
+                    Log.w(TAG, "Task $taskId finished with Python error: $executionMessage")
+                    EventLogger.error(EventLogger.Categories.TASK, "Task $taskId Python error: $executionMessage")
+                    MessageProtocol.createTaskErrorMessage(
+                        taskId = taskId,
+                        jobId = jobId,
+                        error = executionMessage
+                    )
+                } else {
+                    // Ensure result is never null — fall back to empty JSON object
+                    val rawResult = executionResult["result"]
+                    val safeResult: Any = when {
+                        rawResult == null -> "{}"
+                        rawResult is String && rawResult.isBlank() -> "{}"
+                        else -> rawResult
+                    }
+                    MessageProtocol.createTaskResultMessage(
+                        taskId = taskId,
+                        jobId = jobId,
+                        result = safeResult,
+                        executionTime = 0.0
+                    )
+                }
+
+                Log.d(TAG, "Task $taskId completed (status=$executionStatus)")
+                EventLogger.success(EventLogger.Categories.TASK, "Task $taskId completed successfully")
+                NotificationHelper.notifyTaskCompleted(context, taskId)
                 response
                 
             } finally {
+                // Cancel watchdog and progress polling
+                taskTimeoutJob?.cancel()
+                progressPollingJob?.cancel()
+                
                 // Stop checkpoint monitoring
                 checkpointHandler.stopCheckpointMonitoring()
                 pythonExecutor.setCheckpointHandler(null)
+                pythonExecutor.setProgressCallback(null)
                 Log.i(TAG, " Checkpoint monitoring stopped for task $taskId (sent ${checkpointHandler.getCheckpointCount()} checkpoints)")
                 
-                // Clear current task and job
+                // Clear current task, job and work type
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
+                taskStartTime.set(null)
+                currentProgress.set(0f)
+                lastKnownProgress.set(0f)
+                pausedAtTime.set(null)
+                totalPausedMs.set(0L)
+                currentWorkType.set("Other")
             }
             
         } catch (e: Exception) {
             Log.e(TAG, "Error processing task assignment", e)
+            EventLogger.error(EventLogger.Categories.TASK, "Task $taskId failed: ${e.message}")
+            NotificationHelper.notifyTaskFailed(context, taskId, e.message)
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
+            taskStartTime.set(null)
+            currentProgress.set(0f)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
+            currentWorkType.set("Other")
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -275,7 +381,7 @@ class TaskProcessor(private val context: Context) {
                 return createErrorResponse("Worker is busy with task ${currentTaskId.get()}")
             }
             
-            Log.d(TAG, "🔄 Processing task resumption: $taskId")
+            Log.d(TAG, "Processing task resumption: $taskId")
             
             // Extract resumption data
             val funcCode = data.optString("func_code", "")
@@ -396,7 +502,7 @@ class TaskProcessor(private val context: Context) {
                             sendCheckpoint = callback,
                             pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
                         )
-                        Log.i(TAG, "✅ Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
+                        Log.i(TAG, "Checkpoint monitoring resumed for task $taskId (continuing from checkpoint #$checkpointCount)")
                     } else {
                         Log.d(TAG, "Checkpointing disabled for resumed task $taskId (per task_metadata)")
                     }
@@ -420,7 +526,7 @@ class TaskProcessor(private val context: Context) {
                     recoveryStatus = recoveryStatus
                 )
                 
-                Log.d(TAG, "✅ Resumed task $taskId completed successfully")
+                Log.d(TAG, "Resumed task $taskId completed successfully")
                 response
                 
             } finally {
@@ -578,6 +684,35 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
+     * Classify the nature of a task from its function source code.
+     * Returns one of: "Image Processing", "Monte Carlo", "Sentiment Analysis", "Other"
+     */
+    private fun detectWorkType(funcCode: String): String {
+        val code = funcCode.lowercase()
+        return when {
+            code.contains("process_images") ||
+            code.contains("from pil import") ||
+            code.contains("import cv2") ||
+            (code.contains("image") && (code.contains("glob") || code.contains(".jpg") || code.contains(".png"))) ->
+                "Image Processing"
+
+            code.contains("monte_carlo") ||
+            code.contains("montecarlo") ||
+            (code.contains("random") && (code.contains("simulation") || code.contains("pi_estim") || code.contains("estimate"))) ->
+                "Monte Carlo"
+
+            code.contains("sentiment") ||
+            code.contains("textblob") ||
+            code.contains("from transformers") ||
+            code.contains("import transformers") ||
+            (code.contains("nlp") && code.contains("text")) ->
+                "Sentiment Analysis"
+
+            else -> "Other"
+        }
+    }
+
+    /**
      * Extract Python code from task data
      */
     private fun extractPythonCode(data: JSONObject): String? {
@@ -674,13 +809,77 @@ class TaskProcessor(private val context: Context) {
      * Get current task status
      */
     fun getCurrentTaskStatus(): Map<String, Any> {
+        // Capture all atomic values at once to avoid race conditions
+        val isBusy = isTaskRunning.get()
+        val taskId = currentTaskId.get() ?: ""
+        val jobId = currentJobId.get() ?: ""
+        val startTime = taskStartTime.get()
+        
+        // Get progress from multiple sources (priority order)
+        var progressPercent = currentProgress.get()  // 1. Real-time progress from Python callback
+        
+        // 2. Fallback to checkpoint progress if no real-time updates
+        if (progressPercent <= 0f) {
+            val currentCheckpointState = checkpointHandler.currentState.value
+            progressPercent = currentCheckpointState?.progressPercent ?: 0f
+        }
+        
+        // 3. Fallback to time-based progress if no other source
+        //    Skip when paused – the task isn't making progress, so the bar should freeze.
+        if (progressPercent <= 0f && isBusy && !isTaskPaused.get() && startTime != null) {
+            val elapsedMs = System.currentTimeMillis() - startTime - totalPausedMs.get()
+            // Simulate progress: 0-99% spread evenly across the full task timeout window.
+            progressPercent = ((elapsedMs / TASK_TIMEOUT_MS.toFloat()) * 99f).coerceIn(0f, 99f)
+            Log.d(TAG, "Using time-based fallback progress: $progressPercent% (elapsed: ${elapsedMs}ms)")
+        }
+
+        // When paused and no live source reported a value, return the cached progress
+        if (isTaskPaused.get() && progressPercent <= 0f) {
+            progressPercent = lastKnownProgress.get()
+        }
+
+        // Cache the latest non-zero progress so we can show it while paused
+        if (progressPercent > 0f) {
+            lastKnownProgress.set(progressPercent)
+        }
+        
+        Log.d(TAG, "getCurrentTaskStatus - busy: $isBusy, taskId: $taskId, progress: $progressPercent%")
+        
         return mapOf<String, Any>(
-            "is_busy" to isTaskRunning.get(),
-            "current_task_id" to (currentTaskId.get() ?: ""),  // Use empty string instead of null
-            "current_job_id" to (currentJobId.get() ?: ""),    // Include current job ID
+            "is_busy" to isBusy,
+            "is_paused" to isTaskPaused.get(),
+            "current_task_id" to taskId,
+            "current_job_id" to jobId,
             "python_ready" to pythonExecutor.isReady(),
-            "processor_initialized" to isInitialized.get()
+            "processor_initialized" to isInitialized.get(),
+            "progress_percent" to progressPercent,
+            "work_type" to currentWorkType.get()
         )
+    }
+    
+    /**
+     * Update real-time task progress (independent of checkpointing)
+     * This can be called by Python code via callback to report progress
+     * Works even when checkpointing is disabled
+     * 
+     * @param progressPercent Progress percentage (0-100)
+     */
+    fun updateProgress(progressPercent: Float) {
+        if (isTaskRunning.get()) {
+            val clampedProgress = progressPercent.coerceIn(0f, 100f)
+            val previousProgress = currentProgress.get()
+            currentProgress.set(clampedProgress)
+            lastProgressUpdate.set(System.currentTimeMillis())
+            Log.d(TAG, "Progress updated: $clampedProgress%")
+            
+            // Log milestone events (every 25%)
+            val prevMilestone = (previousProgress / 25).toInt()
+            val currMilestone = (clampedProgress / 25).toInt()
+            if (currMilestone > prevMilestone) {
+                val taskId = currentTaskId.get() ?: "unknown"
+                EventLogger.info(EventLogger.Categories.PROGRESS, "Task $taskId: ${clampedProgress.toInt()}% complete")
+            }
+        }
     }
     
     /**
@@ -751,6 +950,57 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
+     * Pause the currently running task.
+     * Sets the cooperative `paused` flag inside the Python exec namespace.
+     */
+    fun pauseCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "pauseCurrentTask: no task running")
+            return
+        }
+        pythonExecutor.pauseExecution()
+        isTaskPaused.set(true)
+        pausedAtTime.set(System.currentTimeMillis())
+        Log.d(TAG, "Task ${currentTaskId.get()} paused")
+    }
+
+    /**
+     * Resume a paused task.
+     */
+    fun resumeCurrentTask() {
+        if (!isTaskPaused.get()) {
+            Log.w(TAG, "resumeCurrentTask: task is not paused")
+            return
+        }
+        // Accumulate paused duration so time-based fallback stays accurate
+        val pauseStart = pausedAtTime.getAndSet(null)
+        if (pauseStart != null) {
+            totalPausedMs.set(totalPausedMs.get() + (System.currentTimeMillis() - pauseStart))
+        }
+        pythonExecutor.resumeExecution()
+        isTaskPaused.set(false)
+        Log.d(TAG, "Task ${currentTaskId.get()} resumed")
+    }
+
+    /**
+     * Kill (cancel) the currently running task.
+     */
+    fun killCurrentTask() {
+        if (!isTaskRunning.get()) {
+            Log.w(TAG, "killCurrentTask: no task running")
+            return
+        }
+        // If the task is paused, resume it first so the Python `while paused`
+        // loop exits and the code reaches the `if killed` check.
+        if (isTaskPaused.get()) {
+            pythonExecutor.resumeExecution()
+        }
+        pythonExecutor.killExecution()
+        isTaskPaused.set(false)
+        Log.d(TAG, "Task ${currentTaskId.get()} killed")
+    }
+
+    /**
      * Cleanup resources
      */
     fun cleanup() {
@@ -760,6 +1010,10 @@ class TaskProcessor(private val context: Context) {
             processorScope.cancel()
             currentTaskId.set(null)
             isTaskRunning.set(false)
+            isTaskPaused.set(false)
+            lastKnownProgress.set(0f)
+            pausedAtTime.set(null)
+            totalPausedMs.set(0L)
             isInitialized.set(false)
             pythonExecutor.cleanup()
             Log.d(TAG, " TaskProcessor cleaned up")

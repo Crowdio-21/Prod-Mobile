@@ -131,18 +131,20 @@ object MessageProtocol {
                 // Otherwise convert to string
                 val resultValue = when (result) {
                     is String -> {
+                        val trimmed = result.trim()
                         // Try to parse as JSON if it looks like JSON
                         try {
-                            if (result.trim().startsWith("{") || result.trim().startsWith("[")) {
-                                JSONObject(result)
-                            } else {
-                                result
+                            when {
+                                trimmed.startsWith("{") -> JSONObject(trimmed)
+                                trimmed.startsWith("[") -> org.json.JSONArray(trimmed)
+                                trimmed.isBlank() -> JSONObject()   // blank → empty object
+                                else -> result
                             }
                         } catch (e: Exception) {
                             result
                         }
                     }
-                    null -> JSONObject.NULL
+                    null -> JSONObject()   // null → empty object, never JSONObject.NULL
                     else -> result.toString()
                 }
                 put("result", resultValue)
@@ -171,17 +173,19 @@ object MessageProtocol {
                 // Handle result properly - if it's already a JSON string, parse it
                 val resultValue = when (result) {
                     is String -> {
+                        val trimmed = result.trim()
                         try {
-                            if (result.trim().startsWith("{") || result.trim().startsWith("[")) {
-                                JSONObject(result)
-                            } else {
-                                result
+                            when {
+                                trimmed.startsWith("{") -> JSONObject(trimmed)
+                                trimmed.startsWith("[") -> org.json.JSONArray(trimmed)
+                                trimmed.isBlank() -> JSONObject()
+                                else -> result
                             }
                         } catch (e: Exception) {
                             result
                         }
                     }
-                    null -> JSONObject.NULL
+                    null -> JSONObject()
                     else -> result.toString()
                 }
                 put("result", resultValue)

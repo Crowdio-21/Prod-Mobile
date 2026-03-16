@@ -1,16 +1,25 @@
 package com.example.mcc_phase3.execution
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import com.chaquo.python.Python
 import com.chaquo.python.PyObject
 import com.chaquo.python.android.AndroidPlatform
 import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
+import com.example.mcc_phase3.utils.EventLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import com.example.mcc_phase3.execution.ImagePickerManager
 
 /**
  * PythonExecutor handles only Python code execution via Chaquopy
@@ -29,9 +38,17 @@ class PythonExecutor(private val context: Context) {
     
     private val isInitialized = AtomicBoolean(false)
     private val workerIdManager = WorkerIdManager.getInstance(context)
+    private val configManager = ConfigManager.getInstance(context)
     
     // Checkpoint handler reference for progress updates during execution
     private val checkpointHandlerRef = AtomicReference<CheckpointHandler?>(null)
+    
+    // The globals dictionary of the currently-executing task code.
+    // pause/resume/kill MUST target this dict so the flags are visible to the running task.
+    private val execGlobalsRef = AtomicReference<PyObject?>(null)
+    
+    // Progress callback for real-time progress updates (independent of checkpointing)
+    private var progressCallback: ((Float) -> Unit)? = null
     
     // Python modules
     private var pythonInstance: Python? = null
@@ -45,6 +62,15 @@ class PythonExecutor(private val context: Context) {
     fun setCheckpointHandler(handler: CheckpointHandler?) {
         checkpointHandlerRef.set(handler)
         Log.d(TAG, "Checkpoint handler ${if (handler != null) "set" else "cleared"}")
+    }
+    
+    /**
+     * Set the progress callback for real-time progress updates
+     * Python code can call builtins._progress_callback(50.0) to report 50% progress
+     */
+    fun setProgressCallback(callback: ((Float) -> Unit)?) {
+        progressCallback = callback
+        Log.d(TAG, "Progress callback ${if (callback != null) "set" else "cleared"}")
     }
     
     /**
@@ -144,11 +170,11 @@ print("[Android Worker] Checkpoint capture disabled")
                 base64Module = pythonInstance?.getModule("base64")
                 
                 isInitialized.set(true)
-                Log.d(TAG, "✅ Python environment initialized successfully")
+                Log.d(TAG, "Python environment initialized successfully")
                 true
                 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to initialize Python environment", e)
+                Log.e(TAG, "Failed to initialize Python environment", e)
                 false
             }
         }
@@ -162,6 +188,7 @@ print("[Android Worker] Checkpoint capture disabled")
      */
     suspend fun executeCode(serializedCode: String, serializedArgs: String? = null): Map<String, Any?> {
         return withContext(Dispatchers.IO) {
+            var previousWorkingDirectory: String? = null
             try {
                 if (!isInitialized.get()) {
                     val initialized = initialize()
@@ -195,12 +222,15 @@ print("[Android Worker] Checkpoint capture disabled")
                 Log.d(TAG, "Python code (first 100 chars): ${pythonCode.take(100)}...")
 
                 // Handle arguments - check if they're base64 encoded or plain text
+                var argsJsonRaw: String? = null
                 val args: PyObject? = if (serializedArgs != null && serializedArgs.isNotEmpty()) {
                     if (isBase64Encoded(serializedArgs)) {
                         val decodedArgs = decodeBase64(serializedArgs)
+                        argsJsonRaw = decodedArgs
                         jsonModule?.callAttr("loads", decodedArgs)
                     } else {
                         // Try to parse as JSON directly
+                        argsJsonRaw = serializedArgs
                         jsonModule?.callAttr("loads", serializedArgs)
                     }
                 } else {
@@ -211,14 +241,32 @@ print("[Android Worker] Checkpoint capture disabled")
                 
                 // Set up checkpoint callback in Python builtins if handler is available
                 setupCheckpointCallback()
+                
+                // Set up progress callback for real-time progress reporting
+                setupProgressCallback()
+
+                val aliasPreparation = prepareCrowdioAliasesForExecution(pythonCode, argsJsonRaw)
+                previousWorkingDirectory = aliasPreparation.previousWorkingDirectory
 
                 // Execute the Python code using the desktop worker approach
                 val result = executeFunctionCode(pythonCode, args)
-                
+
                 // Clean up checkpoint callback
                 cleanupCheckpointCallback()
 
-                Log.d(TAG, "✅ Python code executed successfully")
+                // Clean up progress callback
+                cleanupProgressCallback()
+
+                // Clean up injected image paths
+                cleanupSelectedImages()
+
+                // Clean up injected Crowdio aliases
+                cleanupCrowdioPathAliases()
+
+                // Restore previous working directory if it was changed
+                restoreWorkingDirectory(previousWorkingDirectory)
+
+                Log.d(TAG, "Python code executed successfully")
                 mapOf<String, Any?>(
                     "status" to "success",
                     "message" to "Code executed successfully",
@@ -227,17 +275,33 @@ print("[Android Worker] Checkpoint capture disabled")
                 )
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to execute Python code", e)
+                Log.e(TAG, "Failed to execute Python code", e)
+                cleanupCheckpointCallback()
+                cleanupProgressCallback()
+                cleanupSelectedImages()
+                cleanupCrowdioPathAliases()
+                restoreWorkingDirectory(previousWorkingDirectory)
+                EventLogger.error(EventLogger.Categories.PYTHON, "Python execution failed: ${e.message}")
+                // Encode the error as a JSON string so the backend always receives a parseable result
+                val errorJson = try {
+                    org.json.JSONObject().apply {
+                        put("error", e.message ?: "Unknown error")
+                        put("error_type", e.javaClass.simpleName)
+                        put("status", "error")
+                    }.toString()
+                } catch (_: Exception) {
+                    """{"error":"execution_failed","status":"error"}"""
+                }
                 mapOf<String, Any?>(
                     "status" to "error",
                     "message" to "Execution failed: ${e.message ?: "Unknown error"}",
-                    "result" to null,
+                    "result" to errorJson,
                     "error" to e.toString()
                 )
             }
         }
     }
-    
+
     /**
      * Execute Python code with restored checkpoint state (for task resumption)
      * 
@@ -255,6 +319,7 @@ print("[Android Worker] Checkpoint capture disabled")
         taskArgsJson: String
     ): Map<String, Any?> {
         return withContext(Dispatchers.IO) {
+            var previousWorkingDirectory: String? = null
             try {
                 if (!isInitialized.get()) {
                     val initialized = initialize()
@@ -292,6 +357,9 @@ print("[Android Worker] Checkpoint capture disabled")
                     Log.d(TAG, "⚠️ Detected Transformers library usage, replacing with mobile-compatible version")
                     pythonCode = getMobileCompatibleSentimentFunction()
                 }
+
+                val aliasPreparation = prepareCrowdioAliasesForExecution(pythonCode, taskArgsJson)
+                previousWorkingDirectory = aliasPreparation.previousWorkingDirectory
                 
                 // Execute with isResume=true to inject resume logic
                 val result = executeFunctionCode(pythonCode, taskArgs, isResume = true)
@@ -299,6 +367,9 @@ print("[Android Worker] Checkpoint capture disabled")
                 // Clean up
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
+                cleanupSelectedImages()
+                cleanupCrowdioPathAliases()
+                restoreWorkingDirectory(previousWorkingDirectory)
 
                 Log.d(TAG, "Resumed Python code executed successfully")
                 mapOf<String, Any?>(
@@ -313,6 +384,9 @@ print("[Android Worker] Checkpoint capture disabled")
                 Log.e(TAG, "Failed to execute resumed Python code", e)
                 cleanupRestoredState()
                 cleanupCheckpointCallback()
+                cleanupSelectedImages()
+                cleanupCrowdioPathAliases()
+                restoreWorkingDirectory(previousWorkingDirectory)
                 mapOf<String, Any?>(
                     "status" to "error",
                     "message" to "Resumed execution failed: ${e.message ?: "Unknown error"}",
@@ -418,7 +492,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 
                 val result = executePythonCode(testCode, null, createExecutionContext("test_worker"))
                 
-                Log.d(TAG, "✅ Python execution test successful")
+                Log.d(TAG, "Python execution test successful")
                 mapOf<String, Any?>(
                     "status" to "success",
                     "message" to "Python execution test passed",
@@ -426,7 +500,7 @@ print("[Android Worker] Checkpoint capture disabled")
                 )
                 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Python execution test failed", e)
+                Log.e(TAG, "Python execution test failed", e)
                 mapOf<String, Any?>(
                     "status" to "error",
                     "message" to "Python execution test failed: ${e.message ?: "Unknown error"}",
@@ -544,6 +618,95 @@ print("[Android Worker] Checkpoint callback cleaned up")
             
         } catch (e: Exception) {
             Log.w(TAG, "Failed to clean up checkpoint callback: ${e.message}")
+        }
+    }
+    
+    /**
+     * Set up real-time progress callback in Python builtins
+     * Python code can call: builtins._progress_callback(50.0) to report 50% progress
+     * Works independently of checkpointing
+     */
+    private fun setupProgressCallback() {
+        if (progressCallback != null) {
+            try {
+                val setupCode = """
+import builtins
+
+def _progress_callback(progress_percent):
+    '''
+    Report task progress in real-time (independent of checkpointing).
+    
+    Usage: builtins._progress_callback(50.0)  # Report 50% progress
+    
+    This works even when checkpointing is disabled.
+    '''
+    # Store it so Kotlin can read it
+    builtins._current_progress = float(progress_percent)
+
+builtins._progress_callback = _progress_callback
+builtins._current_progress = 0.0
+
+print("[Android Worker] Progress callback initialized (real-time progress reporting)")
+""".trimIndent()
+                
+                val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+                builtinsModule?.callAttr("exec", setupCode, globalDict)
+                
+                Log.d(TAG, "Progress callback set up in Python builtins")
+                
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set up progress callback: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Clean up progress callback from Python builtins
+     */
+    private fun cleanupProgressCallback() {
+        try {
+            val cleanupCode = """
+import builtins
+
+# Clean up progress callback attributes
+for attr in ['_progress_callback', '_current_progress']:
+    if hasattr(builtins, attr):
+        delattr(builtins, attr)
+
+print("[Android Worker] Progress callback cleaned up")
+""".trimIndent()
+            
+            val globalDict = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            builtinsModule?.callAttr("exec", cleanupCode, globalDict)
+            Log.d(TAG, "Progress callback cleaned up")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to clean up progress callback: ${e.message}")
+        }
+    }
+    
+    /**
+     * Poll real-time progress from Python  
+     * Reads builtins._current_progress and calls the progress callback
+     */
+    fun pollProgressAndUpdate() {
+        if (progressCallback == null) return
+        
+        try {
+            val progressValue = builtinsModule?.callAttr("getattr",
+                pythonInstance?.getModule("builtins"),
+                "_current_progress",
+                0.0f
+            )
+            
+            if (progressValue != null) {
+                val progress = progressValue.toFloat()
+                if (progress > 0f) {
+                    progressCallback?.invoke(progress)
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not poll progress: ${e.message}")
         }
     }
     
@@ -744,7 +907,7 @@ print("[Android Worker] Checkpoint callback cleaned up")
             // Load the sentiment_worker module from Python sources
             val sentimentModule = pythonInstance?.getModule("sentiment_worker")
             if (sentimentModule != null) {
-                Log.d(TAG, "✅ Loaded sentiment_worker module from Python sources")
+                Log.d(TAG, "Loaded sentiment_worker module from Python sources")
                 // Read the module source code
                 val inspect = pythonInstance?.getModule("inspect")
                 val source = inspect?.callAttr("getsource", sentimentModule)?.toString()
@@ -1128,17 +1291,19 @@ def sentiment_analysis_worker(message_data):
                 // Past docstring - add import and resume logic if needed
                 if (!addedImport && passedDocstring && !line.isBlank()) {
                     functionBodyIndent = line.takeWhile { it == ' ' || it == '\t' }
+                    // Only default to "    " inside a function body; module-level code stays at column 0
+                    val injectIndent = functionBodyIndent
                     if (functionBodyIndent.isEmpty()) functionBodyIndent = "    "
                     
                     // Add import builtins before this line
                     if (!funcCode.contains("import builtins")) {
-                        instrumentedLines.add("${functionBodyIndent}import builtins  # Injected for checkpoint support")
+                        instrumentedLines.add("${injectIndent}import builtins  # Injected for checkpoint support")
                     }
                     addedImport = true
                     
                     // Add resume logic if this is a resume execution
                     if (isResume && !addedResumeLogic) {
-                        addResumeLogic(instrumentedLines, functionBodyIndent, varsToCapture)
+                        addResumeLogic(instrumentedLines, injectIndent, varsToCapture)
                         addedResumeLogic = true
                     }
                 }
@@ -1148,16 +1313,18 @@ def sentiment_analysis_worker(message_data):
                     !trimmed.startsWith("\"\"\"") && !trimmed.startsWith("'''")) {
                     passedDocstring = true  // No docstring case
                     functionBodyIndent = line.takeWhile { it == ' ' || it == '\t' }
+                    // Only default to "    " inside a function body; module-level code stays at column 0
+                    val injectIndent = functionBodyIndent
                     if (functionBodyIndent.isEmpty()) functionBodyIndent = "    "
                     
                     if (!funcCode.contains("import builtins")) {
-                        instrumentedLines.add("${functionBodyIndent}import builtins  # Injected for checkpoint support")
+                        instrumentedLines.add("${injectIndent}import builtins  # Injected for checkpoint support")
                     }
                     addedImport = true
                     
                     // Add resume logic if this is a resume execution
                     if (isResume && !addedResumeLogic) {
-                        addResumeLogic(instrumentedLines, functionBodyIndent, varsToCapture)
+                        addResumeLogic(instrumentedLines, injectIndent, varsToCapture)
                         addedResumeLogic = true
                     }
                 }
@@ -1446,7 +1613,691 @@ def sentiment_analysis_worker(message_data):
             else -> false
         }
     }
+
+    private data class AliasPreparation(
+        val previousWorkingDirectory: String?,
+        val aliasesInjected: Boolean
+    )
+
+    private suspend fun prepareCrowdioAliasesForExecution(code: String, argsJson: String?): AliasPreparation {
+        val previousWorkingDirectory = prepareImageInputsIfNeeded(code, argsJson)
+
+        if (!containsCrowdioAliasToken(code, argsJson)) {
+            return AliasPreparation(previousWorkingDirectory = previousWorkingDirectory, aliasesInjected = false)
+        }
+
+        val resolvedFileDir = resolveFileDirForAliases(argsJson)
+            ?: throw IllegalStateException(
+                "Path alias was not resolved on worker. " +
+                    "Unable to resolve ${CrowdioPathAliasResolver.FILE_DIR} from selected folder or task config."
+            )
+
+        val resolvedOutputDir = resolveOutputDirForAliases(argsJson)
+
+        val validationError = CrowdioPathAliasResolver.validate(resolvedFileDir, resolvedOutputDir)
+        if (validationError != null) {
+            throw IllegalStateException("Crowdio path alias validation failed: $validationError")
+        }
+
+        val aliases = CrowdioPathAliasResolver.buildAliasMap(
+            fileDir = resolvedFileDir,
+            cacheDir = context.cacheDir.absolutePath,
+            outputDir = resolvedOutputDir
+        )
+
+        injectCrowdioPathAliases(aliases)
+        return AliasPreparation(previousWorkingDirectory = previousWorkingDirectory, aliasesInjected = true)
+    }
+
+    private fun containsCrowdioAliasToken(code: String, argsJson: String?): Boolean {
+        if (code.contains("@CROWDIO:")) return true
+        return argsJson?.contains("@CROWDIO:") == true
+    }
+
+    private fun resolveFileDirForAliases(argsJson: String?): String? {
+        val workingDirectoryRaw = resolveWorkingDirectoryRaw(argsJson)
+        if (!workingDirectoryRaw.isNullOrBlank()) {
+            if (workingDirectoryRaw.startsWith("content://")) {
+                val stagedPaths = collectImagePathsFromTreeUri(workingDirectoryRaw)
+                if (stagedPaths.isNotEmpty()) {
+                    injectSelectedImages(stagedPaths)
+                    val stagedDir = File(stagedPaths.first()).parentFile?.absolutePath
+                    if (!stagedDir.isNullOrBlank()) {
+                        Log.i(TAG, "Resolved ${CrowdioPathAliasResolver.FILE_DIR} from SAF folder staging: $stagedDir")
+                        return stagedDir
+                    }
+                }
+                Log.e(TAG, "Failed to stage files from selected SAF folder for ${CrowdioPathAliasResolver.FILE_DIR}")
+                return null
+            }
+
+            val normalized = normalizeWorkingDirectoryValue(workingDirectoryRaw)
+            if (!normalized.isNullOrBlank()) {
+                val file = File(normalized)
+                if (file.exists() && file.isDirectory) {
+                    Log.i(TAG, "Resolved ${CrowdioPathAliasResolver.FILE_DIR} from working directory: ${file.absolutePath}")
+                    return file.absolutePath
+                }
+            }
+        }
+
+        val injectedDir = getInjectedImageDirectory()
+        if (!injectedDir.isNullOrBlank()) {
+            Log.i(TAG, "Resolved ${CrowdioPathAliasResolver.FILE_DIR} from injected image paths: $injectedDir")
+            return injectedDir
+        }
+
+        return null
+    }
+
+    private fun resolveOutputDirForAliases(argsJson: String?): String {
+        val fromArgs = extractOutputDirectoryFromArgs(argsJson)?.trim()
+
+        val resolved = when {
+            fromArgs.isNullOrBlank() -> defaultOutputDirectory()
+            CrowdioPathAliasResolver.isAliasToken(fromArgs) -> defaultOutputDirectory()
+            fromArgs.startsWith("content://") -> {
+                Log.w(TAG, "Output directory from SAF URI is not directly writable by Python; using app-local output directory")
+                defaultOutputDirectory()
+            }
+            else -> fromArgs
+        }
+
+        val outputFile = File(resolved)
+        if (!outputFile.exists() && !outputFile.mkdirs()) {
+            throw IllegalStateException("Could not create output directory: $resolved")
+        }
+
+        return outputFile.absolutePath
+    }
+
+    private fun defaultOutputDirectory(): String {
+        return File(context.filesDir, "crowdio_output").absolutePath
+    }
+
+    private fun extractOutputDirectoryFromArgs(argsJson: String?): String? {
+        if (argsJson.isNullOrBlank()) return null
+
+        return try {
+            val trimmed = argsJson.trim()
+            when {
+                trimmed.startsWith("{") -> extractOutputDirectoryFromObject(JSONObject(trimmed))
+                trimmed.startsWith("[") -> extractOutputDirectoryFromArray(JSONArray(trimmed))
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not parse task args for output directory: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractOutputDirectoryFromObject(obj: JSONObject): String? {
+        val candidateKeys = listOf("output_dir", "outputDir", "output_directory", "outputDirectory")
+
+        for (key in candidateKeys) {
+            val value = obj.optString(key, "").trim()
+            if (value.isNotEmpty()) return value
+        }
+
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = obj.opt(key) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractOutputDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractOutputDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractOutputDirectoryFromArray(arr: JSONArray): String? {
+        for (i in 0 until arr.length()) {
+            val value = arr.opt(i) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractOutputDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractOutputDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    private fun injectCrowdioPathAliases(aliases: Map<String, String>) {
+        try {
+            val pyDict = builtinsModule?.callAttr("dict") ?: return
+            aliases.forEach { (key, value) ->
+                pyDict.callAttr("__setitem__", key, value)
+            }
+            builtinsModule?.put("_crowdio_path_aliases", pyDict)
+            Log.i(
+                TAG,
+                "Injected _crowdio_path_aliases: FILE_DIR=${aliases[CrowdioPathAliasResolver.FILE_DIR]}, " +
+                    "CACHE_DIR=${aliases[CrowdioPathAliasResolver.CACHE_DIR]}, " +
+                    "OUTPUT_DIR=${aliases[CrowdioPathAliasResolver.OUTPUT_DIR]}"
+            )
+        } catch (e: Exception) {
+            throw IllegalStateException("Failed to inject _crowdio_path_aliases into Python builtins: ${e.message}")
+        }
+    }
+
+    private fun cleanupCrowdioPathAliases() {
+        try {
+            val hasAttr = builtinsModule?.callAttr("hasattr", builtinsModule, "_crowdio_path_aliases")
+                ?.toJava(Boolean::class.java) == true
+            if (hasAttr) {
+                builtinsModule?.callAttr("delattr", builtinsModule, "_crowdio_path_aliases")
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "cleanupCrowdioPathAliases: ${e.message}")
+        }
+    }
+
+    private fun getInjectedImageDirectory(): String? {
+        return try {
+            val selected = builtinsModule?.callAttr("getattr", builtinsModule, "_selected_images", null)
+                ?: return null
+            val length = selected.callAttr("__len__")?.toJava(Int::class.java) ?: 0
+            if (length <= 0) return null
+            val firstPath = selected.callAttr("__getitem__", 0)?.toString() ?: return null
+            val dir = File(firstPath).parentFile?.absolutePath
+            if (dir.isNullOrBlank()) null else dir
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Extract optional working directory from task args JSON.
+     *
+     * Supports common field names:
+     * - working_directory
+     * - workingDirectory
+     * - directory_path
+     * - directoryPath
+     */
+    private fun extractWorkingDirectoryFromArgs(argsJson: String?): String? {
+        if (argsJson.isNullOrBlank()) return null
+
+        return try {
+            val trimmed = argsJson.trim()
+            when {
+                trimmed.startsWith("{") -> extractWorkingDirectoryFromObject(JSONObject(trimmed))
+                trimmed.startsWith("[") -> extractWorkingDirectoryFromArray(JSONArray(trimmed))
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not parse task args for working directory: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractWorkingDirectoryFromObject(obj: JSONObject): String? {
+        val candidateKeys = listOf("working_directory", "workingDirectory", "directory_path", "directoryPath")
+
+        for (key in candidateKeys) {
+            val value = obj.optString(key, "").trim()
+            if (value.isNotEmpty()) return value
+        }
+
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = obj.opt(key) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractWorkingDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractWorkingDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractWorkingDirectoryFromArray(arr: JSONArray): String? {
+        for (i in 0 until arr.length()) {
+            val value = arr.opt(i) ?: continue
+            when (value) {
+                is JSONObject -> {
+                    val nested = extractWorkingDirectoryFromObject(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+                is JSONArray -> {
+                    val nested = extractWorkingDirectoryFromArray(value)
+                    if (!nested.isNullOrBlank()) return nested
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Resolve effective working directory for execution.
+     * Priority:
+     * 1) task args working directory fields
+     * 2) saved Preferences working directory
+     */
+    private fun resolveWorkingDirectory(argsJson: String?): String? {
+        val fromArgs = extractWorkingDirectoryFromArgs(argsJson)
+        if (!fromArgs.isNullOrBlank()) {
+            val normalized = normalizeWorkingDirectoryValue(fromArgs)
+            if (!normalized.isNullOrBlank()) return normalized
+        }
+
+        val fromPrefs = configManager.getWorkingDir()
+        if (!fromPrefs.isNullOrBlank()) {
+            val normalized = normalizeWorkingDirectoryValue(fromPrefs)
+            if (!normalized.isNullOrBlank()) return normalized
+        }
+
+        return null
+    }
+
+    /**
+     * Resolve raw working directory from args/preferences without path normalization.
+     * Preserves SAF `content://` URIs.
+     */
+    private fun resolveWorkingDirectoryRaw(argsJson: String?): String? {
+        val fromArgs = extractWorkingDirectoryFromArgs(argsJson)?.trim()
+        if (!fromArgs.isNullOrBlank()) return fromArgs
+
+        val fromPrefs = configManager.getWorkingDir().trim()
+        if (fromPrefs.isNotBlank()) return fromPrefs
+
+        return null
+    }
+
+    /**
+     * Normalize a directory value from task args or preferences.
+     * Supports plain filesystem paths and Android tree content URIs.
+     */
+    private fun normalizeWorkingDirectoryValue(rawValue: String): String? {
+        val trimmed = rawValue.trim()
+        if (trimmed.isEmpty()) return null
+
+        return if (trimmed.startsWith("content://")) {
+            resolveTreeUriToFilePath(trimmed)
+        } else {
+            trimmed
+        }
+    }
+
+    /**
+     * Convert Android Storage Access Framework tree URI to a filesystem path.
+     * Example:
+     * content://.../tree/primary:Download -> /storage/emulated/0/Download
+     */
+    private fun resolveTreeUriToFilePath(uriString: String): String? {
+        return try {
+            val uri = Uri.parse(uriString)
+            val treeDocId = uri.lastPathSegment?.substringAfter("tree/") ?: return null
+            val decodedDocId = Uri.decode(treeDocId)
+
+            when {
+                decodedDocId.startsWith("primary:") -> {
+                    val relative = decodedDocId.removePrefix("primary:")
+                    if (relative.isBlank()) "/storage/emulated/0" else "/storage/emulated/0/$relative"
+                }
+                decodedDocId.contains(":") -> {
+                    val type = decodedDocId.substringBefore(":")
+                    val relative = decodedDocId.substringAfter(":")
+                    if (type.isBlank() || relative.isBlank()) null else "/storage/$type/$relative"
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Failed to resolve tree URI to path: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Set Python process working directory for task execution.
+     * Returns the previous working directory when successful, null otherwise.
+     */
+    private fun setupWorkingDirectory(workingDirectory: String): String? {
+        return try {
+            val dir = File(workingDirectory)
+            if (!dir.exists() || !dir.isDirectory) {
+                Log.w(TAG, "Working directory is invalid: $workingDirectory")
+                return null
+            }
+
+            val osModule = pythonInstance?.getModule("os") ?: return null
+            val previousDir = osModule.callAttr("getcwd")?.toString()
+            osModule.callAttr("chdir", dir.absolutePath)
+            builtinsModule?.put("_task_working_directory", dir.absolutePath)
+            Log.d(TAG, "Python working directory set to: ${dir.absolutePath}")
+            previousDir
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set working directory: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Restore Python process working directory after task execution.
+     */
+    private fun restoreWorkingDirectory(previousDirectory: String?) {
+        if (previousDirectory.isNullOrBlank()) return
+
+        try {
+            val osModule = pythonInstance?.getModule("os") ?: return
+            osModule.callAttr("chdir", previousDirectory)
+
+            val hasAttr = builtinsModule?.callAttr("hasattr", builtinsModule, "_task_working_directory")
+                ?.toJava(Boolean::class.java) == true
+            if (hasAttr) {
+                builtinsModule?.callAttr("delattr", builtinsModule, "_task_working_directory")
+            }
+
+            Log.d(TAG, "Python working directory restored to: $previousDirectory")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore working directory: ${e.message}")
+        }
+    }
+
+    /**
+     * Ensure image tasks always get an input source.
+     *
+     * Strategy:
+     * 1) If task args already include image input fields, do nothing.
+     * 2) Try effective working directory (task args or preferences): set cwd and inject images found there.
+     * 3) If still no images, launch picker and inject selected images.
+     *
+     * @return previous working directory when cwd was changed, else null.
+     */
+    private suspend fun prepareImageInputsIfNeeded(code: String, argsJson: String?): String? {
+        if (!isImageTask(code, argsJson)) return null
+
+        if (hasImageInputsInArgs(argsJson)) {
+            Log.d(TAG, "Image task already has image inputs in task args; skipping picker/injection")
+            return null
+        }
+
+        val workingDirectoryRaw = resolveWorkingDirectoryRaw(argsJson)
+        if (!workingDirectoryRaw.isNullOrBlank()) {
+            if (workingDirectoryRaw.startsWith("content://")) {
+                val imagePaths = collectImagePathsFromTreeUri(workingDirectoryRaw)
+                if (imagePaths.isNotEmpty()) {
+                    injectSelectedImages(imagePaths)
+                    Log.d(TAG, "Injected ${imagePaths.size} image path(s) from selected SAF folder")
+                    return null
+                }
+                Log.w(TAG, "No image files found in selected SAF folder – falling back to picker")
+            } else {
+                val workingDirectory = normalizeWorkingDirectoryValue(workingDirectoryRaw)
+                if (!workingDirectory.isNullOrBlank()) {
+                    val previousDir = setupWorkingDirectory(workingDirectory)
+                    if (previousDir != null) {
+                        val imagePaths = collectImagePathsFromDirectory(workingDirectory)
+                        if (imagePaths.isNotEmpty()) {
+                            injectSelectedImages(imagePaths)
+                            Log.d(TAG, "Injected ${imagePaths.size} image path(s) from working directory: $workingDirectory")
+                            return previousDir
+                        }
+                        Log.w(TAG, "No image files found in working directory '$workingDirectory' – falling back to picker")
+                        return previousDir.also {
+                            val selectedPaths = ImagePickerManager.getInstance().awaitImageSelection(context)
+                            injectSelectedImages(selectedPaths)
+                            Log.d(TAG, "Injected ${selectedPaths.size} image path(s) from picker")
+                        }
+                    }
+                    Log.w(TAG, "Could not use working directory '$workingDirectory' – falling back to picker")
+                }
+            }
+        } else {
+            Log.d(TAG, "Image task has no working directory (task args or preferences) – launching image picker")
+        }
+
+        val selectedPaths = ImagePickerManager.getInstance().awaitImageSelection(context)
+        injectSelectedImages(selectedPaths)
+        Log.d(TAG, "Injected ${selectedPaths.size} image path(s) from picker")
+        return null
+    }
+
+    /** True if the code/args indicate image processing work. */
+    private fun isImageTask(code: String, argsJson: String?): Boolean {
+        if (requiresImageSelection(code)) return true
+
+        val lowerCode = code.lowercase()
+        if (lowerCode.contains("image_dir") ||
+            lowerCode.contains("image_path") ||
+            lowerCode.contains("image_paths") ||
+            lowerCode.contains("cv2") ||
+            lowerCode.contains("imread(") ||
+            lowerCode.contains("from pil import") ||
+            lowerCode.contains("import pillow") ||
+            lowerCode.contains("_selected_images")) {
+            return true
+        }
+
+        val lowerArgs = argsJson?.lowercase() ?: ""
+        return lowerArgs.contains("image_dir") ||
+               lowerArgs.contains("image_path") ||
+               lowerArgs.contains("image_paths") ||
+               lowerArgs.contains("images")
+    }
+
+    /** True when task args already provide image input fields. */
+    private fun hasImageInputsInArgs(argsJson: String?): Boolean {
+        if (argsJson.isNullOrBlank()) return false
+        return try {
+            val trimmed = argsJson.trim()
+            when {
+                trimmed.startsWith("{") -> objectHasImageInputs(JSONObject(trimmed))
+                trimmed.startsWith("[") -> arrayHasImageInputs(JSONArray(trimmed))
+                else -> false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun objectHasImageInputs(obj: JSONObject): Boolean {
+        val imageKeys = listOf("image_dir", "image_path", "image_paths", "images")
+        for (key in imageKeys) {
+            if (!obj.isNull(key)) {
+                val raw = obj.opt(key)
+                when (raw) {
+                    is String -> if (raw.isNotBlank()) return true
+                    is JSONArray -> if (raw.length() > 0) return true
+                    else -> if (raw != null) return true
+                }
+            }
+        }
+
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            when (val value = obj.opt(keys.next())) {
+                is JSONObject -> if (objectHasImageInputs(value)) return true
+                is JSONArray -> if (arrayHasImageInputs(value)) return true
+            }
+        }
+        return false
+    }
+
+    private fun arrayHasImageInputs(arr: JSONArray): Boolean {
+        for (i in 0 until arr.length()) {
+            when (val value = arr.opt(i)) {
+                is JSONObject -> if (objectHasImageInputs(value)) return true
+                is JSONArray -> if (arrayHasImageInputs(value)) return true
+            }
+        }
+        return false
+    }
+
+    /** Collect image files from a directory recursively for auto-injection. */
+    private fun collectImagePathsFromDirectory(directoryPath: String): List<String> {
+        return try {
+            val dir = File(directoryPath)
+            if (!dir.exists() || !dir.isDirectory) return emptyList()
+
+            val validExt = setOf("jpg", "jpeg", "png", "bmp", "gif", "webp")
+            dir.walkTopDown()
+                .filter { it.isFile }
+                .filter { file ->
+                    val ext = file.extension.lowercase()
+                    validExt.contains(ext)
+                }
+                .map { it.absolutePath }
+                .toList()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to collect images from working directory '$directoryPath': ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Collect image files from an Android SAF tree URI by copying them to app cache.
+     * Returns local absolute paths readable by Python libraries.
+     */
+    private fun collectImagePathsFromTreeUri(treeUriString: String): List<String> {
+        return try {
+            val treeUri = Uri.parse(treeUriString)
+            val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
+            if (!root.exists() || !root.isDirectory) return emptyList()
+
+            val cacheRoot = File(context.cacheDir, "task_images").apply { mkdirs() }
+            val runDir = File(cacheRoot, "run_${System.currentTimeMillis()}").apply { mkdirs() }
+
+            val imagePaths = mutableListOf<String>()
+            val queue = ArrayDeque<DocumentFile>()
+            queue.add(root)
+
+            while (queue.isNotEmpty()) {
+                val current = queue.removeFirst()
+                current.listFiles().forEach { child ->
+                    when {
+                        child.isDirectory -> queue.add(child)
+                        child.isFile && isImageDocument(child) -> {
+                            val copiedPath = copyDocumentToCache(child, runDir)
+                            if (!copiedPath.isNullOrBlank()) imagePaths.add(copiedPath)
+                        }
+                    }
+                }
+            }
+
+            imagePaths
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to collect images from SAF folder: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun isImageDocument(file: DocumentFile): Boolean {
+        val name = (file.name ?: "").lowercase()
+        val mime = (file.type ?: "").lowercase()
+        if (mime.startsWith("image/")) return true
+        return name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") ||
+                name.endsWith(".bmp") || name.endsWith(".gif") || name.endsWith(".webp")
+    }
+
+    private fun copyDocumentToCache(doc: DocumentFile, outputDir: File): String? {
+        return try {
+            val sourceName = doc.name ?: "image_${System.nanoTime()}.bin"
+            val safeName = sourceName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val outFile = File(outputDir, safeName)
+
+            context.contentResolver.openInputStream(doc.uri)?.use { input ->
+                FileOutputStream(outFile).use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return null
+
+            outFile.absolutePath
+        } catch (e: Exception) {
+            Log.d(TAG, "Failed to copy SAF file to cache: ${e.message}")
+            null
+        }
+    }
     
+    // ── Image-selection helpers ──────────────────────────────────────────────
+
+    /**
+     * Returns true when the Python code looks like an image-processing function
+     * that needs the user to supply images from the device gallery.
+     *
+     * Detection criteria (any one is sufficient):
+     *  - Function name contains "process_images"
+     *  - Function body imports PIL/Pillow (from PIL import …)
+     *  - Function name contains "image" **and** uses PIL/glob/base64
+     */
+    private fun requiresImageSelection(code: String): Boolean {
+        val funcName = extractFunctionName(code)?.lowercase() ?: ""
+        val lowerCode = code.lowercase()
+
+        // Strongest explicit signal: backend code already references the injected variable
+        if (lowerCode.contains("_selected_images")) return true
+
+        // Explicit image-processing function name
+        if (funcName.contains("process_images") || funcName.contains("image_process")) return true
+
+        // PIL is imported AND glob is used specifically to search for image files by extension
+        val importsPil = lowerCode.contains("from pil import") ||
+                         lowerCode.contains("import pil.")  ||
+                         lowerCode.contains("import pil\n") ||
+                         lowerCode.contains("import pil ")
+        val imageGlobSearch = lowerCode.contains("glob.glob") &&
+                              (lowerCode.contains(".jpg") || lowerCode.contains(".png") ||
+                               lowerCode.contains(".jpeg") || lowerCode.contains(".bmp") ||
+                               lowerCode.contains(".gif")  || lowerCode.contains(".webp"))
+
+        return importsPil && imageGlobSearch && funcName.contains("image")
+    }
+
+    /**
+     * Injects the selected image file paths into Python builtins so that any
+     * executing Python function can access them as:
+     *
+     *   import builtins
+     *   paths = builtins._selected_images   # list[str]
+     *
+     * @param paths Absolute file-system paths returned by [ImagePickerManager].
+     */
+    private fun injectSelectedImages(paths: List<String>) {
+        try {
+            val pyList = builtinsModule?.callAttr("list") ?: return
+            paths.forEach { path -> pyList.callAttr("append", path) }
+            builtinsModule?.put("_selected_images", pyList)
+            Log.d(TAG, "builtins._selected_images set to $paths")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to inject selected images: ${e.message}")
+        }
+    }
+
+    /**
+     * Removes [_selected_images] from Python builtins after the task finishes.
+     */
+    private fun cleanupSelectedImages() {
+        try {
+            val hasAttr = builtinsModule?.callAttr("hasattr", builtinsModule, "_selected_images")
+                ?.toJava(Boolean::class.java) == true
+            if (hasAttr) {
+                builtinsModule?.callAttr("delattr", builtinsModule, "_selected_images")
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "cleanupSelectedImages: ${e.message}")
+        }
+    }
+
+    // ── Function execution ───────────────────────────────────────────────────
+
     /**
      * Execute function code using desktop worker approach
      * Matches the desktop worker's _execute_task method
@@ -1464,7 +2315,7 @@ def sentiment_analysis_worker(message_data):
         val hasCheckpointHandler = handler != null
         
         return try {
-            Log.d(TAG, "🔄 Executing task... | worker_runtime=android | func=$funcName | checkpoint=$hasCheckpointHandler | resume=$isResume")
+            Log.d(TAG, "Executing task... | worker_runtime=android | func=$funcName | checkpoint=$hasCheckpointHandler | resume=$isResume")
             
             // Instrument code for checkpointing if handler is set
             val codeToExecute = if (hasCheckpointHandler && funcName != null) {
@@ -1515,7 +2366,7 @@ def sentiment_analysis_worker(message_data):
                 disableCheckpointTrace()
             }
             
-            Log.d(TAG, "✅ Task completed successfully")
+            Log.d(TAG, "Task completed successfully")
             
             // result is already a Java object from executeFunctionWithArgs
             Log.d(TAG, "Function result: $result")
@@ -1527,7 +2378,7 @@ def sentiment_analysis_worker(message_data):
                 disableCheckpointTrace()
             }
             val errorMsg = "Task execution failed: ${e.message}"
-            Log.e(TAG, "❌ Task failed: $errorMsg")
+            Log.e(TAG, "Task failed: $errorMsg")
             throw Exception(errorMsg)
         }
     }
@@ -1574,11 +2425,20 @@ def sentiment_analysis_worker(message_data):
             
             // Convert PyObject result to proper Java type
             if (pyResult == null) {
-                return "null"
+                Log.d(TAG, "Function returned Kotlin null – using empty result")
+                return "{}"
             }
-            
-            // Check if it's a Python dict and convert to JSON string
+
+            // Check for Python None (pyResult is a PyObject wrapping None)
             val builtins = pythonInstance?.getModule("builtins")
+            val noneType = builtins?.callAttr("type", builtins.get("None"))
+            val isNone = builtins?.callAttr("isinstance", pyResult, noneType)?.toJava(Boolean::class.java) == true
+            if (isNone) {
+                Log.d(TAG, "Function returned Python None – using empty result")
+                return "{}"
+            }
+
+            // Check if it's a Python dict and convert to JSON string
             val dictType = builtins?.get("dict")
             val isDict = builtins?.callAttr("isinstance", pyResult, dictType)?.toJava(Boolean::class.java) == true
             
@@ -1599,15 +2459,16 @@ def sentiment_analysis_worker(message_data):
             // For other types, try to convert via JSON
             try {
                 val jsonStr = jsonModule?.callAttr("dumps", pyResult)?.toString()
-                if (jsonStr != null) {
+                if (jsonStr != null && jsonStr != "null") {
                     return jsonStr
                 }
             } catch (e: Exception) {
                 Log.d(TAG, "JSON conversion failed, using toString: ${e.message}")
             }
-            
-            // Fallback to string representation
-            pyResult.toString()
+
+            // Fallback to string representation (exclude bare "null")
+            val strRepr = pyResult.toString()
+            if (strRepr == "null" || strRepr == "None") "{}" else strRepr
             
         } catch (e: Exception) {
             Log.e(TAG, "Error executing function with arguments", e)
@@ -1714,16 +2575,21 @@ def sentiment_analysis_worker(message_data):
         return try {
             Log.d(TAG, "Deserializing function: ${funcCode.take(200)}...")
             
-            // Create a local namespace for the exec (equivalent to local_vars = {})
-            val localVars = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            // Use a SINGLE dict for both globals and locals so that module-level
+            // variables (paused, killed) and function definitions (pause, resume,
+            // kill, task function) all share the same namespace.  This is critical:
+            // functions that use `global paused` will reference this dict, so the
+            // flags MUST live here too.
+            val execGlobals = pythonInstance?.getModule("builtins")?.callAttr("dict")
             
-            // Create global namespace (empty dict)
-            val globalVars = pythonInstance?.getModule("builtins")?.callAttr("dict")
+            // Execute the function code — single-dict exec makes globals == locals
+            builtinsModule?.callAttr("exec", funcCode, execGlobals)
             
-            // Execute the function code in the local namespace (equivalent to exec(func_code, {}, local_vars))
-            builtinsModule?.callAttr("exec", funcCode, globalVars, localVars)
+            // Save the reference so pause/resume/kill can target the same namespace
+            execGlobalsRef.set(execGlobals)
+            Log.d(TAG, "Saved execGlobals reference for task control")
             
-            // Find the function object in local_vars (equivalent to finding types.FunctionType)
+            // Find the function object in execGlobals
             val typesModule = pythonInstance?.getModule("types")
             val functionType = typesModule?.get("FunctionType")
             
@@ -1732,7 +2598,7 @@ def sentiment_analysis_worker(message_data):
             // Try to find function by name first (more reliable)
             val functionName = extractFunctionName(funcCode)
             if (functionName != null) {
-                val namedFunc = localVars?.get(functionName)
+                val namedFunc = execGlobals?.get(functionName)
                 if (namedFunc != null) {
                     val isInstance = functionType?.callAttr("__instancecheck__", namedFunc)
                     if (isInstance?.toJava(Boolean::class.java) == true) {
@@ -1746,15 +2612,13 @@ def sentiment_analysis_worker(message_data):
             if (func == null) {
                 Log.d(TAG, "Function not found by name, searching through all values...")
                 
-                // Convert dict_values to list first (equivalent to list(local_vars.values()))
-                val values = localVars?.callAttr("values")
+                val values = execGlobals?.callAttr("values")
                 val valuesList = builtinsModule?.callAttr("list", values)
                 val valuesJavaList = valuesList?.asList()
                 
                 valuesJavaList?.forEach { value ->
                     val pyValue = value as? PyObject
                     if (pyValue != null) {
-                        // Check if the value is an instance of FunctionType
                         val isInstance = functionType?.callAttr("__instancecheck__", pyValue)
                         if (isInstance?.toJava(Boolean::class.java) == true) {
                             func = pyValue
@@ -1766,11 +2630,10 @@ def sentiment_analysis_worker(message_data):
             }
             
             if (func == null) {
-                // Log all available keys for debugging
-                val keys = localVars?.callAttr("keys")
+                val keys = execGlobals?.callAttr("keys")
                 val keysList = builtinsModule?.callAttr("list", keys)
                 val keysJavaList = keysList?.asList()
-                Log.e(TAG, "Available keys in local_vars: $keysJavaList")
+                Log.e(TAG, "Available keys in execGlobals: $keysJavaList")
                 throw Exception("No function could be deserialized from code string. Available keys: $keysJavaList")
             }
             
@@ -1835,18 +2698,121 @@ def sentiment_analysis_worker(message_data):
         }
     }
     
+    // ── Task control (pause / resume / kill) ────────────────────────────────
+
+    /**
+     * Helper: read a value from the exec globals *dict* by key.
+     * Uses dict.get(key) so it returns Python None (mapped to null) when absent.
+     * Do NOT use PyObject.get() – that calls getattr(), which doesn't work on dicts.
+     */
+    private fun dictGet(dict: PyObject, key: String): PyObject? {
+        val value = dict.callAttr("get", key)
+        // Chaquopy wraps Python None as a non-null PyObject; detect it explicitly.
+        val builtins = pythonInstance?.getModule("builtins") ?: return null
+        val isNone = builtins.callAttr("isinstance", value,
+            builtins.callAttr("type", builtins.get("None"))
+        )?.toJava(Boolean::class.java) == true
+        return if (isNone) null else value
+    }
+
+    /**
+     * Helper: set a value in the exec globals *dict*.
+     * Uses dict.__setitem__ instead of PyObject.put() (which calls setattr).
+     */
+    private fun dictSet(dict: PyObject, key: String, value: Any?) {
+        dict.callAttr("__setitem__", key, value)
+    }
+
+    /**
+     * Pause the currently running task by setting the `paused` flag in the
+     * exec globals dict that the task code is actively reading.
+     */
+    fun pauseExecution() {
+        val globals = execGlobalsRef.get()
+        if (globals == null) {
+            Log.w(TAG, "pauseExecution: no execGlobals – task may not be running")
+            return
+        }
+        try {
+            // Prefer calling the pause() function defined in the task code so
+            // that any side-effects (e.g. checkpoint flush) are honoured.
+            val pauseFn = dictGet(globals, "pause")
+            if (pauseFn != null) {
+                pauseFn.call()
+                Log.d(TAG, "pauseExecution: called pause() in exec namespace")
+            } else {
+                // Fallback: set the flag directly in the dict
+                dictSet(globals, "paused", true)
+                Log.d(TAG, "pauseExecution: set paused=True directly in execGlobals")
+            }
+        } catch (e: Exception) {
+            // Last-resort fallback
+            try { dictSet(globals, "paused", true) } catch (_: Exception) {}
+            Log.w(TAG, "pauseExecution error (flag set via fallback): ${e.message}")
+        }
+    }
+
+    /**
+     * Resume the currently paused task.
+     */
+    fun resumeExecution() {
+        val globals = execGlobalsRef.get()
+        if (globals == null) {
+            Log.w(TAG, "resumeExecution: no execGlobals – task may not be running")
+            return
+        }
+        try {
+            val resumeFn = dictGet(globals, "resume")
+            if (resumeFn != null) {
+                resumeFn.call()
+                Log.d(TAG, "resumeExecution: called resume() in exec namespace")
+            } else {
+                dictSet(globals, "paused", false)
+                Log.d(TAG, "resumeExecution: set paused=False directly in execGlobals")
+            }
+        } catch (e: Exception) {
+            try { dictSet(globals, "paused", false) } catch (_: Exception) {}
+            Log.w(TAG, "resumeExecution error (flag set via fallback): ${e.message}")
+        }
+    }
+
+    /**
+     * Kill (cancel) the currently running task.
+     */
+    fun killExecution() {
+        val globals = execGlobalsRef.get()
+        if (globals == null) {
+            Log.w(TAG, "killExecution: no execGlobals – task may not be running")
+            return
+        }
+        try {
+            val killFn = dictGet(globals, "kill")
+            if (killFn != null) {
+                killFn.call()
+                Log.d(TAG, "killExecution: called kill() in exec namespace")
+            } else {
+                dictSet(globals, "killed", true)
+                Log.d(TAG, "killExecution: set killed=True directly in execGlobals")
+            }
+        } catch (e: Exception) {
+            try { dictSet(globals, "killed", true) } catch (_: Exception) {}
+            Log.w(TAG, "killExecution error (flag set via fallback): ${e.message}")
+        }
+    }
+
     /**
      * Cleanup resources
      */
     fun cleanup() {
         try {
             Log.d(TAG, "Cleaning up Python executor...")
+            execGlobalsRef.set(null)
             isInitialized.set(false)
             pythonInstance = null
             builtinsModule = null
             jsonModule = null
             base64Module = null
-            Log.d(TAG, "✅ Python executor cleaned up")
+            Log.d(TAG, "Python executor cleaned up")
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }

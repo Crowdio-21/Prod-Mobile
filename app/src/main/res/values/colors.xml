@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Light Theme Colors -->
-    <color name="primary">#1976D2</color>
-    <color name="primary_dark">#1565C0</color>
-    <color name="primary_light">#BBDEFB</color>
+    <color name="primary">#0A3D7A</color>
+    <color name="primary_dark">#072E5C</color>
+    <color name="primary_darker">#051F3E</color>
+    <color name="title_bar_blue">#002E52</color>
+    <color name="primary_light">#C5D9F0</color>
     <color name="accent">#FF5722</color>
     <color name="surface_primary">#FFFFFF</color>
     <color name="surface_secondary">#F5F5F5</color>
@@ -14,11 +16,12 @@
     <color name="warning">#FF9800</color>
     <color name="error">#F44336</color>
     <color name="info">#2196F3</color>
+    <color name="pause_worker">#9D585C</color>
 
     <!-- Dark Theme Colors -->
-    <color name="primary_dark_theme">#90CAF9</color>
-    <color name="primary_dark_dark_theme">#64B5F6</color>
-    <color name="primary_light_dark_theme">#1976D2</color>
+    <color name="primary_dark_theme">#5B92CF</color>
+    <color name="primary_dark_dark_theme">#4A7AB5</color>
+    <color name="primary_light_dark_theme">#0A3D7A</color>
     <color name="accent_dark_theme">#FF8A65</color>
     <color name="surface_primary_dark">#121212</color>
     <color name="surface_secondary_dark">#1E1E1E</color>
@@ -40,9 +43,9 @@
     <color name="white">#FFFFFFFF</color>
     
     <!-- Additional Colors for Device Info UI -->
-    <color name="primary_color">#1976D2</color>
-    <color name="primary_color_light">#BBDEFB</color>
-    <color name="primary_dark_color">#1565C0</color>
+    <color name="primary_color">#0A3D7A</color>
+    <color name="primary_color_light">#C5D9F0</color>
+    <color name="primary_dark_color">#072E5C</color>
     <color name="light_gray">#F5F5F5</color>
     <color name="dark_gray">#424242</color>
     <color name="gray">#757575</color>

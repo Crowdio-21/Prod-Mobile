@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark Mode color overrides — remap all light-theme color names to dark values -->
+
+    <!-- Backgrounds -->
+    <color name="background_light">#121212</color>
+    <color name="surface_primary">#1E1E1E</color>
+    <color name="surface_secondary">#2C2C2C</color>
+
+    <!-- Primary palette — lighter shades for readability on dark backgrounds -->
+    <color name="primary">#5B92CF</color>
+    <color name="primary_dark">#4A7AB5</color>
+    <color name="primary_darker">#3A6A9E</color>
+    <color name="primary_light">#0A3D7A</color>
+    <color name="title_bar_blue">#001F3A</color>
+    <color name="accent">#FF8A65</color>
+
+    <!-- Text -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#B0B0B0</color>
+
+    <!-- Semantic status colors — lighter for dark background contrast -->
+    <color name="success">#81C784</color>
+    <color name="warning">#FFB74D</color>
+    <color name="error">#E57373</color>
+    <color name="info">#64B5F6</color>
+    <color name="pause_worker">#C47B7E</color>
+
+    <!-- Additional named colors used in layouts -->
+    <color name="primary_color">#5B92CF</color>
+    <color name="primary_color_light">#1E3A5F</color>
+    <color name="primary_dark_color">#4A7AB5</color>
+    <color name="light_gray">#2C2C2C</color>
+    <color name="dark_gray">#B0B0B0</color>
+    <color name="gray">#808080</color>
+</resources>

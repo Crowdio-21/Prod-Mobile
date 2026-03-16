@@ -160,7 +160,7 @@ class SettingsActivity : AppCompatActivity() {
             val statsUrl = configManager.getStatServiceURL()
             
             if (foremanUrl == null || statsUrl == null) {
-                statusTextView.text = "❌ Configuration incomplete\nPlease configure Foreman IP address first."
+                statusTextView.text = "Configuration incomplete\nPlease configure Foreman IP address first."
                 return
             }
             
@@ -177,20 +177,20 @@ class SettingsActivity : AppCompatActivity() {
                     val jobsResult = repository.getJobs(0, 1)
                     
                     if (jobsResult.isSuccess) {
-                        statusTextView.text = "✅ Connection successful!\n" +
+                        statusTextView.text = "Connection successful!\n" +
                                 "Foreman WebSocket: $foremanUrl\n" +
                                 "Stats HTTP: $statsUrl\n" +
                                 "Retrieved ${jobsResult.getOrNull()?.size ?: 0} jobs"
                         showSuccess("Connection test successful!")
                     } else {
-                        statusTextView.text = "❌ Connection failed!\n" +
+                        statusTextView.text = "Connection failed!\n" +
                                 "Foreman WebSocket: $foremanUrl\n" +
                                 "Stats HTTP: $statsUrl\n" +
                                 "Error: ${jobsResult.exceptionOrNull()?.message}"
                         showError("Connection test failed: ${jobsResult.exceptionOrNull()?.message}")
                     }
                 } catch (e: Exception) {
-                    statusTextView.text = "❌ Connection failed!\n" +
+                    statusTextView.text = "Connection failed!\n" +
                             "Foreman WebSocket: $foremanUrl\n" +
                             "Stats HTTP: $statsUrl\n" +
                             "Error: ${e.message}"

@@ -39,7 +39,7 @@ class TaskProgressSimulator {
      * Start simulating a task execution
      */
     fun startTaskSimulation(taskId: String, shouldSucceed: Boolean = true) {
-        Log.d(TAG, "🚀 Starting task simulation for: $taskId")
+        Log.d(TAG, "Starting task simulation for: $taskId")
         
         val startTime = System.currentTimeMillis()
         val taskProgress = TaskProgress(
@@ -89,7 +89,7 @@ class TaskProgressSimulator {
                     activeTasks[taskId] = finalTask
                     updateProgressFlow()
                     
-                    Log.d(TAG, "✅ Task simulation completed: $taskId (${elapsed}ms)")
+                    Log.d(TAG, "Task simulation completed: $taskId (${elapsed}ms)")
                     break
                 }
                 
@@ -102,7 +102,7 @@ class TaskProgressSimulator {
             updateProgressFlow()
             
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Task simulation failed: $taskId", e)
+            Log.e(TAG, "Task simulation failed: $taskId", e)
             val failedTask = activeTasks[taskId]?.copy(
                 status = "failed",
                 error = "Simulation error: ${e.message}"

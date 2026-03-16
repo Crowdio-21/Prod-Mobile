@@ -70,7 +70,7 @@ class ActivityFragment : Fragment() {
         // Start a demo task simulation for demonstration
         lifecycleScope.launch {
             delay(1000) // Wait 1 second after fragment is created
-            Log.d(TAG, "🚀 Starting demo task simulation")
+            Log.d(TAG, "Starting demo task simulation")
             taskProgressSimulator.startTaskSimulation("demo_task_001", shouldSucceed = true)
             
             // Start another demo task after a delay
@@ -82,7 +82,7 @@ class ActivityFragment : Fragment() {
     private fun observeTaskProgress() {
         lifecycleScope.launch {
             taskProgressSimulator.taskProgressFlow.collect { taskProgressMap ->
-                Log.d(TAG, "📊 Task progress updated: ${taskProgressMap.size} active tasks")
+                Log.d(TAG, "Task progress updated: ${taskProgressMap.size} active tasks")
                 
                 // Update the activity list with current progress
                 val currentState = viewModel.state.value

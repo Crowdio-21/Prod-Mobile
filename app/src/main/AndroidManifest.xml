@@ -4,7 +4,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.BATTERY_STATS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
         tools:ignore="ScopedStorage" />
@@ -12,6 +13,7 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="true"
@@ -80,6 +82,49 @@
             android:launchMode="singleTop"
             android:parentActivityName=".MainActivity"
             android:windowSoftInputMode="adjustResize" />
+        
+        <activity
+            android:name=".ui.activities.PreferencesActivity"
+            android:exported="false"
+            android:label="Preferences"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.HelpActivity"
+            android:exported="false"
+            android:label="Help"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.ReportIssueActivity"
+            android:exported="false"
+            android:label="Report Issue"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.AboutActivity"
+            android:exported="false"
+            android:label="About"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+        
+        <activity
+            android:name=".ui.activities.EventLogActivity"
+            android:exported="false"
+            android:label="Event Log"
+            android:theme="@style/AppTheme"
+            android:parentActivityName=".MainActivity" />
+
+        <!-- Transparent trampoline used to display the system image picker
+             when a Python task requires device images (e.g. process_images_on_device). -->
+        <activity
+            android:name=".ui.activities.ImagePickerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Transparent.AppCompat"
+            android:excludeFromRecents="true" />
     </application>
 
 </manifest>

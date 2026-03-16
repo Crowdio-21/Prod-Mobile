@@ -28,10 +28,10 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="⚙️ Settings"
+                    android:text="Settings"
                     android:textSize="24sp"
                     android:textStyle="bold"
-                    android:textColor="@android:color/holo_blue_dark" />
+                    android:textColor="?attr/colorPrimary" />
 
                 <TextView
                     android:layout_width="wrap_content"
@@ -39,7 +39,7 @@
                     android:layout_marginTop="8dp"
                     android:text="Configure your Foreman server IP address and ports.\nMake sure the Foreman is running and accessible from your device."
                     android:textSize="14sp"
-                    android:textColor="@android:color/darker_gray" />
+                    android:textColor="?android:attr/textColorSecondary" />
 
             </LinearLayout>
 

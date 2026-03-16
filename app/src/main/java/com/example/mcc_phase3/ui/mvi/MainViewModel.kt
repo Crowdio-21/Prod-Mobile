@@ -33,15 +33,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val TAG = "MainViewModel"
     }
 
-    // ✅ FIXED: Only implement methods that exist in WebSocketManager.WebSocketListener interface
+    // FIXED: Only implement methods that exist in WebSocketManager.WebSocketListener interface
     private val webSocketListener = object : WebSocketManager.WebSocketListener {
         override fun onConnected() {
-            Log.d(TAG, "🔌 WebSocket connected")
+            Log.d(TAG, "WebSocket connected")
             updateWebSocketStatus(true)
         }
 
         override fun onMessage(message: String) {
-            Log.d(TAG, "📨 WebSocket message received: $message")
+            Log.d(TAG, "WebSocket message received: $message")
             // Parse message to see if it's an error or rejection
             if (message.contains("error") || message.contains("reject") || message.contains("invalid")) {
                 Log.e(TAG, "🚨 SERVER ERROR/REJECTION: $message")
@@ -50,12 +50,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         override fun onDisconnected() {
-            Log.w(TAG, "🔌 WebSocket disconnected")
+            Log.w(TAG, "WebSocket disconnected")
             updateWebSocketStatus(false)
         }
 
         override fun onError(error: Exception?) {
-            Log.e(TAG, "❌ WebSocket error", error)
+            Log.e(TAG, "WebSocket error", error)
             updateWebSocketStatus(false)
         }
     }
@@ -79,11 +79,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadData() {
-        Log.d(TAG, "📊 loadData() called")
+        Log.d(TAG, "loadData() called")
         
         // Check if foreman is configured
         if (!configManager.isForemanConfigured()) {
-            Log.w(TAG, "⚠️ Foreman not configured, showing error state")
+            Log.w(TAG, "Foreman not configured, showing error state")
             _state.value = MainState.Error("Please configure Foreman IP address in Settings first")
             return
         }
@@ -93,22 +93,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val startTime = System.currentTimeMillis()
                 _state.value = MainState.Loading
 
-                // ✅ Sequential data fetching with detailed logging
-                Log.d(TAG, "📊 Fetching stats...")
+                // Sequential data fetching with detailed logging
+                Log.d(TAG, "Fetching stats...")
                 val stats = repository.getStats()
-                Log.d(TAG, "📊 Stats result: ${if (stats.isSuccess) "✅ Success" else "❌ Failed - ${stats.exceptionOrNull()?.message}"}")
+                Log.d(TAG, "Stats result: ${if (stats.isSuccess) "Success" else "Failed - ${stats.exceptionOrNull()?.message}"}")
 
-                Log.d(TAG, "📊 Fetching jobs...")
+                Log.d(TAG, "Fetching jobs...")
                 val jobs = repository.getJobs()
-                Log.d(TAG, "📊 Jobs result: ${if (jobs.isSuccess) "✅ Success" else "❌ Failed - ${jobs.exceptionOrNull()?.message}"}")
+                Log.d(TAG, "Jobs result: ${if (jobs.isSuccess) "Success" else "Failed - ${jobs.exceptionOrNull()?.message}"}")
 
-                Log.d(TAG, "📊 Fetching workers...")
+                Log.d(TAG, "Fetching workers...")
                 val workers = repository.getWorkers()
-                Log.d(TAG, "📊 Workers result: ${if (workers.isSuccess) "✅ Success" else "❌ Failed - ${workers.exceptionOrNull()?.message}"}")
+                Log.d(TAG, "Workers result: ${if (workers.isSuccess) "Success" else "Failed - ${workers.exceptionOrNull()?.message}"}")
 
-                Log.d(TAG, "📊 Fetching websocket stats...")
+                Log.d(TAG, "Fetching websocket stats...")
                 val websocketStats = repository.getWebsocketStats()
-                Log.d(TAG, "📊 WebSocket stats result: ${if (websocketStats.isSuccess) "✅ Success" else "❌ Failed - ${websocketStats.exceptionOrNull()?.message}"}")
+                Log.d(TAG, "WebSocket stats result: ${if (websocketStats.isSuccess) "Success" else "Failed - ${websocketStats.exceptionOrNull()?.message}"}")
 
 //                Log.d(TAG, "📊 Fetching activity...")
 //                val activity = repository.getActivity()
@@ -130,7 +130,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     _state.value = successState
 
-                    Log.d(TAG, "✅ Data loaded successfully:")
+                    Log.d(TAG, "Data loaded successfully:")
                     Log.d(TAG, "   - Jobs: ${successState.jobs.size}")
                     Log.d(TAG, "   - Workers: ${successState.workers.size}")
                     Log.d(TAG, "   - Activity: ${successState.activity.size}")
@@ -143,11 +143,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val finalErrorMsg = errorMsg.trim().ifEmpty { "Unknown error occurred" }
                     _state.value = MainState.Error(finalErrorMsg)
-                    Log.e(TAG, "❌ Data load failed: $finalErrorMsg")
+                    Log.e(TAG, "Data load failed: $finalErrorMsg")
                 }
 
                 val totalTime = System.currentTimeMillis() - startTime
-                Log.d(TAG, "📊 loadData() completed in ${totalTime}ms")
+                Log.d(TAG, "loadData() completed in ${totalTime}ms")
 
             } catch (e: Exception) {
                 Log.e(TAG, "💥 loadData() exception", e)
@@ -157,7 +157,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshData() {
-        Log.d(TAG, "🔄 refreshData() called - recreating repository and resetting circuit breaker")
+        Log.d(TAG, "refreshData() called - recreating repository and resetting circuit breaker")
         // Force complete reset of ApiClient
         com.example.mcc_phase3.data.api.ApiClient.reset(application)
         // Recreate repository to get fresh configuration
@@ -168,19 +168,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun connectWebSocket() {
-        Log.d(TAG, "🔌 connectWebSocket() called")
+        Log.d(TAG, "connectWebSocket() called")
         val configManager = ConfigManager.getInstance(getApplication())
         val wsUrl = configManager.getForemanURL() // Using ConfigManager
         if (wsUrl == null) {
-            Log.w(TAG, "⚠️ Cannot connect WebSocket: Foreman IP not configured")
+            Log.w(TAG, "Cannot connect WebSocket: Foreman IP not configured")
             return
         }
-        Log.d(TAG, "🔌 Connecting to: $wsUrl")
+        Log.d(TAG, "Connecting to: $wsUrl")
         repository.connectWebSocket(wsUrl)
     }
 
     private fun disconnectWebSocket() {
-        Log.d(TAG, "🔌 disconnectWebSocket() called")
+        Log.d(TAG, "disconnectWebSocket() called")
         repository.disconnectWebSocket()
     }
 
@@ -224,9 +224,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // ✅ FIXED: Thread-safe WebSocket status updates
+    // FIXED: Thread-safe WebSocket status updates
     private fun updateWebSocketStatus(isConnected: Boolean) {
-        Log.d(TAG, "🔌 updateWebSocketStatus() called with isConnected: $isConnected")
+        Log.d(TAG, "updateWebSocketStatus() called with isConnected: $isConnected")
 
         // Ensure we're on the main thread
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -240,12 +240,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateStateOnMainThread(isConnected: Boolean) {
         val currentState = _state.value
-        Log.d(TAG, "🔌 Current state: ${currentState?.javaClass?.simpleName}")
+        Log.d(TAG, "Current state: ${currentState?.javaClass?.simpleName}")
 
         when (currentState) {
             is MainState.Success -> {
                 _state.value = currentState.copy(isWebSocketConnected = isConnected)
-                Log.d(TAG, "🔌 WebSocket status updated in Success state: $isConnected")
+                Log.d(TAG, "WebSocket status updated in Success state: $isConnected")
             }
             is MainState.Error -> {
                 // Update error state with connection status too
@@ -258,11 +258,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     isWebSocketConnected = isConnected
                 )
                 _state.value = updatedState
-                Log.d(TAG, "🔌 WebSocket status updated, moved from Error to Success state: $isConnected")
+                Log.d(TAG, "WebSocket status updated, moved from Error to Success state: $isConnected")
             }
             else -> {
                 if (isConnected) {
-                    Log.d(TAG, "🔌 WebSocket connected - triggering loadData()")
+                    Log.d(TAG, "WebSocket connected - triggering loadData()")
                     loadData()
                 } else {
                     // Create minimal state with connection status
@@ -274,7 +274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         activity = emptyList(),
                         isWebSocketConnected = isConnected
                     )
-                    Log.d(TAG, "🔌 WebSocket disconnected - updated state: $isConnected")
+                    Log.d(TAG, "WebSocket disconnected - updated state: $isConnected")
                 }
             }
         }

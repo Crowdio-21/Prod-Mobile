@@ -1,6 +1,7 @@
 package com.example.mcc_phase3.checkpoint
 
 import android.util.Log
+import com.example.mcc_phase3.utils.EventLogger
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -181,8 +182,10 @@ class CheckpointHandler(
                             checkpointCount = 1
                             isBaseSent = true
 
-                            Log.i(TAG, "📦 Sending BASE #$checkpointCount for task $taskId | " +
+                            Log.i(TAG, "Sending BASE #$checkpointCount for task $taskId | " +
                                     "Size: ${compressed.size} bytes | Progress: ${state.progressPercent}%")
+                            EventLogger.info(EventLogger.Categories.CHECKPOINT, 
+                                "BASE checkpoint #$checkpointCount sent (${compressed.size} bytes, ${state.progressPercent}% complete)")
 
                             CheckpointMessage(
                                 taskId = taskId,
@@ -204,8 +207,10 @@ class CheckpointHandler(
                             checkpointCount++
                             lastCheckpointState = compressed
 
-                            Log.i(TAG, "📦 Sending DELTA #$checkpointCount for task $taskId | " +
+                            Log.i(TAG, "Sending DELTA #$checkpointCount for task $taskId | " +
                                     "Delta size: ${deltaBytes.size} bytes | Progress: ${state.progressPercent}%")
+                            EventLogger.debug(EventLogger.Categories.CHECKPOINT, 
+                                "DELTA checkpoint #$checkpointCount sent (${deltaBytes.size} bytes)")
 
                             CheckpointMessage(
                                 taskId = taskId,
