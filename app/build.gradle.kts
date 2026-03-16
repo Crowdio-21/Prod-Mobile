@@ -64,6 +64,8 @@ android {
                 install("requests")
                 install("aiohttp")
                 install("Pillow")
+                install("tflite-runtime")
+
             }
         }
     }
@@ -94,6 +96,9 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // Ktor for D2D tensor transfer (TCP sockets)
+    implementation("io.ktor:ktor-network:2.3.7")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
