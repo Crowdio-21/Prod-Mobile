@@ -2,52 +2,52 @@ package com.example.mcc_phase3.communication
 
 import android.content.Context
 import android.util.Log
+import com.example.mcc_phase3.checkpoint.CheckpointMessage
+import com.example.mcc_phase3.checkpoint.CheckpointStateHolder
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
-import com.example.mcc_phase3.execution.TaskProcessor
-import com.example.mcc_phase3.checkpoint.CheckpointMessage
+import com.example.mcc_phase3.execution.TaskExecutionResult
+import com.example.mcc_phase3.execution.TaskExecutor
 import com.example.mcc_phase3.utils.EventLogger
 import com.example.mcc_phase3.utils.NotificationHelper
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
-import org.java_websocket.client.WebSocketClient
-import org.java_websocket.drafts.Draft_6455
-import org.java_websocket.handshake.ServerHandshake
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
-import java.net.URI
-import java.util.Collections
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicReference
 
-/**
- * Native Kotlin WebSocket client for worker communication
- * This class handles:
- * - WebSocket connection to backend
- * - Sending worker registration and status updates
- * - Receiving task assignments
- * - NOT executing Python code (delegated to TaskProcessor)
- */
 class WorkerWebSocketClient(
     private val context: Context,
-    private val taskProcessor: TaskProcessor
+    private val taskExecutor: TaskExecutor
+
+
+
 ) {
-    
+
     companion object {
         private const val TAG = "WorkerWebSocketClient"
-        private const val HEARTBEAT_INTERVAL = 30000L // 30 seconds
-        private const val RECONNECT_DELAY = 5000L // 5 seconds
-        private const val MAX_RECONNECT_ATTEMPTS = 10
-        // Some foreman payloads can be large during transition periods. Keep this high enough
-        // to avoid immediate 1009 disconnects while Kotlin strips heavy fields downstream.
-        private const val MAX_INBOUND_FRAME_BYTES = 64 * 1024 * 1024 // 64 MB hard cap
-        // Allow moderate result payloads while still capping oversized frames.
-        // This value should stay below backend or proxy hard limits.
+        private const val HEARTBEAT_INTERVAL = 30_000L
         private const val MAX_OUTBOUND_MESSAGE_BYTES = 4 * 1024 * 1024
         private const val DISCONNECT_NOTIFY_COOLDOWN_MS = 30_000L
         private const val DEFAULT_RESULT_UPLOAD_PORT = 8001
@@ -58,492 +58,530 @@ class WorkerWebSocketClient(
         val fileUrl: String?,
         val error: String?
     )
-    
+
     private val workerIdManager = WorkerIdManager.getInstance(context)
     private val configManager = ConfigManager.getInstance(context)
+    private val checkpointStateHolder = CheckpointStateHolder()
+    private val clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val currentUrl = AtomicReference<String?>(null)
+    private val webSocketRef = AtomicReference<WebSocket?>(null)
+    private val pendingConnect = AtomicReference<CompletableDeferred<Boolean>?>(null)
+    private val isConnected = AtomicBoolean(false)
+    private val isConnecting = AtomicBoolean(false)
+    private val isRunning = AtomicBoolean(false)
+    private val lastDisconnectNotificationAt = AtomicLong(0L)
+    private val listeners = mutableSetOf<WorkerWebSocketListener>()
+
     private val resultUploadClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
-    
-    private var webSocket: WebSocketClient? = null
-    private val isConnected = AtomicBoolean(false)
-    private val isRunning = AtomicBoolean(false)
-    private val isConnecting = AtomicBoolean(false)
-    private val reconnectAttempts = AtomicLong(0)
-    private val lastDisconnectNotificationAt = AtomicLong(0)
-    
+
+    private val webSocketClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .pingInterval(30, TimeUnit.SECONDS)
+        .build()
+
+    private val reconnectionManager = ReconnectionManager(clientScope) {
+        attemptConnect(currentUrl.get())
+    }
+
     private var heartbeatJob: Job? = null
-    private var reconnectJob: Job? = null
-    private val clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    
-    // Listeners
-    private val listeners = mutableSetOf<WorkerWebSocketListener>()
-    
-    /**
-     * Connect to the backend WebSocket server
-     */
+
     suspend fun connect(url: String): Boolean {
         return withContext(Dispatchers.IO) {
-            if (!isConnecting.compareAndSet(false, true)) {
-                Log.d(TAG, "connect() skipped: another connect attempt is already in progress")
-                return@withContext isConnected.get()
-            }
             try {
-                Log.d(TAG, "Connecting to WebSocket: $url")
-                
-                // Initialize task processor
-                val processorInitialized = taskProcessor.initialize()
-                if (!processorInitialized) {
-                    Log.e(TAG, "Failed to initialize task processor")
+                currentUrl.set(url)
+
+                if (!taskExecutor.initialize()) {
+                    Log.e(TAG, "Failed to initialize task executor")
                     return@withContext false
                 }
-                
-                // Set up checkpoint callback to send checkpoints via WebSocket
-                taskProcessor.setCheckpointCallback { checkpointMsg ->
-                    sendCheckpointMessage(checkpointMsg)
+
+                if (isConnected.get() && currentUrl.get() == url) {
+                    return@withContext true
                 }
-                
-                // Disconnect if already connected
-                if (isConnected.get()) {
-                    disconnect()
-                }
-                
-                val uri = URI(url)
-                val draft = Draft_6455(
-                    Collections.emptyList(),
-                    MAX_INBOUND_FRAME_BYTES
-                )
-                val connectResult = CompletableDeferred<Boolean>()
 
-                webSocket = object : WebSocketClient(uri, draft) {
-                    override fun onOpen(handshake: ServerHandshake?) {
-                        Log.d(TAG, "WebSocket connected to $url")
-                        EventLogger.success(EventLogger.Categories.WEBSOCKET, "Connected to foreman: $url")
-                        NotificationHelper.notifyWorkerConnected(context)
-                        isConnected.set(true)
-                        reconnectAttempts.set(0)
-                        
-                        // Start heartbeat
-                        startHeartbeat()
-                        
-                        // Register worker
-                        registerWorker()
-                        
-                        // Notify listeners
-                        listeners.forEach { it.onConnected() }
-
-                        if (!connectResult.isCompleted) {
-                            connectResult.complete(true)
-                        }
-                    }
-                    
-                    override fun onMessage(message: String?) {
-                        message?.let { msg ->
-                            val preview = if (msg.length > 512) "${msg.take(512)}..." else msg
-                            Log.d(TAG, "Received message (${msg.length} chars): $preview")
-                            clientScope.launch {
-                                handleMessage(msg)
-                            }
-                        }
-                    }
-                    
-                    override fun onClose(code: Int, reason: String?, remote: Boolean) {
-                        Log.w(TAG, "WebSocket closed (code=$code, reason=$reason, remote=$remote)")
-                        if (code == 1009) {
-                            Log.e(
-                                TAG,
-                                "WebSocket closed with 1009 (message too large). " +
-                                    "Likely oversized inbound payload from foreman; prefer metadata-only task payloads."
-                            )
-                        }
-                        EventLogger.warning(EventLogger.Categories.WEBSOCKET, "Disconnected (code=$code, reason=$reason)")
-                        val wasConnected = isConnected.getAndSet(false)
-                        maybeNotifyDisconnected(wasConnected, reason)
-                        stopHeartbeat()
-                        
-                        // Notify listeners
-                        listeners.forEach { it.onDisconnected() }
-
-                        if (!connectResult.isCompleted) {
-                            connectResult.complete(false)
-                        }
-                        
-                        // Attempt reconnection whenever the worker is running.
-                        // Manual disconnect sets isRunning=false before closing.
-                        if (isRunning.get()) {
-                            scheduleReconnection(url)
-                        }
-                    }
-                    
-                    override fun onError(ex: Exception?) {
-                        Log.e(TAG, "WebSocket error", ex)
-                        if (ex?.message?.contains("max frame", ignoreCase = true) == true ||
-                            ex?.message?.contains("frame size", ignoreCase = true) == true ||
-                            ex?.message?.contains("Failed to allocate", ignoreCase = true) == true
-                        ) {
-                            Log.e(TAG, "Inbound WebSocket frame exceeded safe limit ($MAX_INBOUND_FRAME_BYTES bytes)")
-                            EventLogger.error(
-                                EventLogger.Categories.WEBSOCKET,
-                                "Inbound frame too large; closing socket to avoid OOM"
-                            )
-                            webSocket?.close()
-                        }
-                        EventLogger.error(EventLogger.Categories.WEBSOCKET, "Connection error: ${ex?.message ?: "Unknown"}")
-                        listeners.forEach { it.onError(ex) }
-
-                        if (!connectResult.isCompleted) {
-                            connectResult.complete(false)
-                        }
-                    }
-                }
-                
-                webSocket?.connect()
                 isRunning.set(true)
+                reconnectionManager.start()
 
-                withTimeoutOrNull(30_000L) { connectResult.await() } ?: false
+                val deferred = CompletableDeferred<Boolean>()
+                pendingConnect.getAndSet(deferred)?.cancel()
+                attemptConnect(url)
+
+                withTimeoutOrNull(30_000L) { deferred.await() } ?: false
             } catch (e: CancellationException) {
-                // Expected when service stops, reconnect is replaced, or caller scope is cancelled.
                 Log.i(TAG, "WebSocket connect coroutine cancelled: ${e.message}")
                 false
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to connect to WebSocket", e)
+                Log.e(TAG, "Failed to connect to foreman", e)
                 false
-            } finally {
-                isConnecting.set(false)
             }
         }
     }
-    
-    /**
-     * Disconnect from WebSocket
-     */
+
     fun disconnect() {
-        Log.d(TAG, "Disconnecting WebSocket...")
+        Log.d(TAG, "Disconnecting WebSocket client")
         isRunning.set(false)
+        reconnectionManager.stop()
         stopHeartbeat()
-        reconnectJob?.cancel()
-        webSocket?.close()
-        webSocket = null
+        pendingConnect.getAndSet(null)?.cancel()
+        webSocketRef.getAndSet(null)?.close(1000, "Client disconnect")
         isConnected.set(false)
-        Log.d(TAG, "WebSocket disconnected")
+        isConnecting.set(false)
     }
-    
-    /**
-     * Send message to backend
-     */
-    fun sendMessage(message: String) {
-        if (isConnected.get()) {
-            try {
-                val sizeBytes = message.toByteArray(Charsets.UTF_8).size
-                if (sizeBytes > MAX_OUTBOUND_MESSAGE_BYTES) {
-                    Log.e(TAG, "Refusing to send oversized WebSocket message (${sizeBytes}B > ${MAX_OUTBOUND_MESSAGE_BYTES}B)")
-                    EventLogger.error(
-                        EventLogger.Categories.WEBSOCKET,
-                        "Outbound message too large (${sizeBytes}B); dropped to avoid close code 1009"
-                    )
+
+    private suspend fun attemptConnect(url: String?) {
+        if (url.isNullOrBlank() || !isRunning.get()) {
+            return
+        }
+
+        if (!isConnecting.compareAndSet(false, true)) {
+            return
+        }
+
+        try {
+            Log.d(TAG, "Connecting to foreman: $url")
+            val request = Request.Builder().url(url).build()
+            val webSocket = webSocketClient.newWebSocket(request, createListener())
+            webSocketRef.set(webSocket)
+        } catch (e: Exception) {
+            isConnecting.set(false)
+            completePendingConnect(false)
+            reconnectionManager.onDisconnected()
+            throw e
+        }
+    }
+
+    private fun createListener(): WebSocketListener {
+        return object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (webSocketRef.get() !== webSocket) {
+                    webSocket.close(1000, "Superseded connection")
                     return
                 }
-                webSocket?.send(message)
-                Log.d(TAG, "Message sent: $message")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send message", e)
+
+                isConnecting.set(false)
+                isConnected.set(true)
+                reconnectionManager.onConnected()
+                completePendingConnect(true)
+
+                Log.d(TAG, "WebSocket connected to ${currentUrl.get()}")
+                EventLogger.success(EventLogger.Categories.WEBSOCKET, "Connected to foreman: ${currentUrl.get()}")
+                NotificationHelper.notifyWorkerConnected(context)
+
+                startHeartbeat()
+                sendWorkerReady()
+                listeners.forEach { it.onConnected() }
             }
-        } else {
-            Log.w(TAG, "Cannot send message - not connected")
-        }
-    }
-    
-    /**
-     * Send checkpoint message to foreman via WebSocket
-     */
-    private suspend fun sendCheckpointMessage(checkpoint: CheckpointMessage) {
-        withContext(Dispatchers.IO) {
-            try {
-                if (isConnected.get()) {
-                    val json = checkpoint.toJsonString()
-                    webSocket?.send(json)
-                    
-                    val checkpointType = if (checkpoint.isBase) "BASE" else "DELTA"
-                    Log.i(TAG, "[Checkpoint] Task ${checkpoint.taskId} | $checkpointType #${checkpoint.checkpointId} | " +
-                            "Progress: ${checkpoint.progressPercent}%")
-                } else {
-                    Log.w(TAG, "Cannot send checkpoint - not connected")
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val preview = if (text.length > 512) "${text.take(512)}..." else text
+                Log.d(TAG, "Received message (${text.length} chars): $preview")
+                clientScope.launch {
+                    handleMessage(text)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending checkpoint: ${e.message}")
             }
-        }
-    }
-    
-    /**
-     * Register worker with backend
-     */
-    private fun registerWorker() {
-        clientScope.launch {
-            try {
-                val workerId = workerIdManager.getOrGenerateWorkerId()
-                
-                // Create WORKER_READY message with device specs (auto-collected)
-                Log.d(TAG, "Collecting device specifications...")
-                val readyMessage = MessageProtocol.createWorkerReadyMessage(
-                    workerId = workerId,
-                    context = context
-                )
-                
-                sendMessage(readyMessage)
-                Log.d(TAG, "Worker ready message sent with device specs: $workerId")
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send worker ready message", e)
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                handleSocketClosed(webSocket, code, reason, null)
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                handleSocketClosed(webSocket, response?.code ?: -1, t.message, t)
+                listeners.forEach { it.onError(Exception(t)) }
             }
         }
     }
-    
-    /**
-     * Handle incoming messages from backend
-     */
-    private suspend fun handleMessage(message: String) {
-        try {
-            Log.d(TAG, "Processing message (${message.length} chars)")
-            
-            // Parse the message using the new protocol
-            val messageData = MessageProtocol.parseMessage(message)
-            if (messageData == null) {
-                Log.w(TAG, "Failed to parse message: $message")
-                return
+
+    private fun handleSocketClosed(
+        webSocket: WebSocket,
+        code: Int,
+        reason: String?,
+        error: Throwable?
+    ) {
+        if (webSocketRef.get() !== webSocket) {
+            return
+        }
+
+        webSocketRef.compareAndSet(webSocket, null)
+        val wasConnected = isConnected.getAndSet(false)
+        isConnecting.set(false)
+        stopHeartbeat()
+
+        val message = reason ?: error?.message
+        Log.w(TAG, "WebSocket disconnected (code=$code, reason=$message)")
+        EventLogger.warning(
+            EventLogger.Categories.WEBSOCKET,
+            "Disconnected from foreman (code=$code, reason=${message ?: "unknown"})"
+        )
+
+        maybeNotifyDisconnected(wasConnected, message)
+        completePendingConnect(false)
+        listeners.forEach { it.onDisconnected() }
+
+        if (isRunning.get()) {
+            reconnectionManager.onDisconnected()
+        }
+    }
+
+    private fun completePendingConnect(success: Boolean) {
+        pendingConnect.getAndSet(null)?.let { deferred ->
+            if (!deferred.isCompleted) {
+                deferred.complete(success)
             }
-            
-            // Handle different message types
-            when (messageData.type) {
-                MessageProtocol.MessageType.ASSIGN_TASK -> {
-                    handleTaskAssignment(messageData)
-                }
-                MessageProtocol.MessageType.RESUME_TASK -> {
-                    handleTaskResumption(messageData)
-                }
-                MessageProtocol.MessageType.PING -> {
-                    handlePing(messageData)
-                }
-                MessageProtocol.MessageType.CHECKPOINT_ACK -> {
-                    // Checkpoint acknowledgment received, log for debugging
-                    val data = messageData.data
-                    val checkpointId = data?.optInt("checkpoint_id", -1) ?: -1
-                    val taskId = data?.optString("task_id", "") ?: ""
-                    Log.d(TAG, "Checkpoint #$checkpointId acknowledged for task $taskId")
-                }
-                else -> {
-                    Log.w(TAG, "Unknown message type: ${messageData.type}")
-                }
+        }
+    }
+
+    private fun sendWorkerReady() {
+        val workerId = workerIdManager.getOrGenerateWorkerId()
+        val deviceSpecs = DeviceInfoCollector(context).getDeviceSpecs()
+
+        val message = JSONObject().apply {
+            put("type", MessageType.WORKER_READY)
+            put("timestamp", System.currentTimeMillis())
+            put("data", JSONObject().apply {
+                put("worker_id", workerId)
+                put("worker_type", "android_kotlin")
+                put("platform", "android")
+                put("runtime", "jvm")
+                put("capabilities", JSONObject().apply {
+                    put("supports_settrace", false)
+                    put("supports_frame_introspection", false)
+                })
+                put("device_specs", JSONObject(deviceSpecs.toMap()))
+            })
+        }.toString()
+
+        sendMessage(message)
+    }
+
+    private suspend fun handleMessage(rawMessage: String) {
+        val inboundMessage = Protocol.parseInboundMessage(rawMessage)
+        if (inboundMessage == null) {
+            Log.w(TAG, "Failed to parse inbound message")
+            return
+        }
+
+        when (inboundMessage.type) {
+            MessageType.ASSIGN_TASK -> handleAssignTask(inboundMessage)
+            MessageType.RESUME_TASK -> handleResumeTask(inboundMessage)
+            MessageType.PING -> handlePing()
+            MessageType.CHECKPOINT_ACK -> handleCheckpointAck(inboundMessage)
+            else -> Log.w(TAG, "Unhandled message type: ${inboundMessage.type}")
+        }
+    }
+
+    private suspend fun handleAssignTask(message: InboundMessage) {
+        val payload = message.data
+        if (payload == null) {
+            Log.w(TAG, "assign_task missing data payload")
+            return
+        }
+
+        val taskId = payload.optString("task_id")
+        if (taskId.isBlank()) {
+            Log.w(TAG, "assign_task missing task_id")
+            return
+        }
+
+        taskExecutor.executeTask(
+            taskId = taskId,
+            jobId = message.jobId,
+            payload = payload,
+            onResult = { result ->
+                sendTaskResult(taskId, message.jobId, result)
+            },
+            onError = { error ->
+                sendTaskError(taskId, message.jobId, error)
+            },
+            onCheckpoint = { checkpoint ->
+                sendCheckpoint(checkpoint)
             }
-            
+        )
+    }
+
+    private suspend fun handleResumeTask(message: InboundMessage) {
+        val payload = try {
+            ResumeTaskPayload.from(message)
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling message", e)
-        }
-    }
-    
-    /**
-     * Handle task assignment from foreman
-     */
-    private suspend fun handleTaskAssignment(messageData: MessageProtocol.MessageData) {
-        // Declare data outside try-catch so it's accessible in catch block
-        val data = messageData.data
-        
-        try {
-            if (data == null) {
-                Log.w(TAG, "No data in task assignment message")
-                return
-            }
-            
-            val taskId = data.optString("task_id", "")
-            val jobId = messageData.jobId
-            val funcCode = data.optString("func_code", "")
-            val taskArgs = data.optString("task_args", "")
-            
-            Log.d(TAG, "Received task assignment: $taskId for job: $jobId")
-            Log.d(TAG, "Function code length: ${funcCode.length}, Task args: $taskArgs")
-            EventLogger.info(EventLogger.Categories.TASK, "Received task assignment: $taskId (Job: $jobId)")
-            
-            // Create a proper task message for TaskProcessor
-            val taskMessage = JSONObject().apply {
-                put("type", "assign_task")
-                put("data", data)
-                if (jobId != null) {
-                    put("job_id", jobId)
-                }
-                put("timestamp", System.currentTimeMillis())
-            }.toString()
-            
-            // Process the task through TaskProcessor
-            val response = taskProcessor.processTaskMessage(taskMessage)
-            
-            // Send response back to backend
-            response?.let { resp ->
-                sendTaskResponseWithSizeGuard(taskId, messageData.jobId, resp)
-                Log.d(TAG, "Task result sent")
-            }
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling task assignment", e)
-            
-            // Send error response
-            val errorResponse = MessageProtocol.createTaskErrorMessage(
-                taskId = data?.optString("task_id", "") ?: "unknown",
-                jobId = messageData.jobId,
-                error = "Task assignment failed: ${e.message ?: "Unknown error"}"
+            Log.e(TAG, "Failed to parse resume_task payload", e)
+            sendTaskError(
+                taskId = message.data?.optString("task_id") ?: "unknown",
+                jobId = message.jobId,
+                error = "Invalid resume payload: ${e.message ?: "unknown error"}"
             )
-            sendMessage(errorResponse)
+            return
         }
-    }
-    
-    /**
-     * Handle task resumption from foreman (resume from checkpoint)
-     */
-    private suspend fun handleTaskResumption(messageData: MessageProtocol.MessageData) {
-        val data = messageData.data
-        
-        try {
-            if (data == null) {
-                Log.w(TAG, "No data in task resumption message")
-                return
+
+        checkpointStateHolder.update(
+            checkpointId = payload.checkpointId,
+            taskId = payload.taskId,
+            jobId = payload.jobId,
+            deltaDataHex = payload.deltaDataHex,
+            progressPercent = payload.progressPercent,
+            stateVars = payload.stateVars
+        )
+
+        taskExecutor.resumeFromCheckpoint(
+            taskId = payload.taskId,
+            jobId = payload.jobId,
+            checkpointId = payload.checkpointId,
+            deltaDataHex = payload.deltaDataHex,
+            stateVars = payload.stateVars,
+            onResult = { result ->
+                sendTaskResult(payload.taskId, payload.jobId, result)
+            },
+            onError = { error ->
+                sendTaskError(payload.taskId, payload.jobId, error)
+            },
+            onCheckpoint = { checkpoint ->
+                sendCheckpoint(checkpoint)
             }
-            
-            val taskId = data.optString("task_id", "")
-            val jobId = messageData.jobId
-            val funcCode = data.optString("func_code", "")
-            val taskArgs = data.optString("task_args", "")
-            
-            Log.d(TAG, "Received task RESUMPTION: $taskId for job: $jobId")
-            Log.d(TAG, "Function code length: ${funcCode.length}, Task args: $taskArgs")
-            
-            // Check if checkpoint data is present
-            val checkpointData = data.optString("checkpoint_data", null)
-            val checkpointCount = data.optInt("checkpoint_count", 0)
-            if (checkpointData != null) {
-                Log.d(TAG, "Checkpoint data present, resuming from checkpoint #$checkpointCount")
-            }
-            
-            // Create a proper resume_task message for TaskProcessor
-            val taskMessage = JSONObject().apply {
-                put("type", MessageProtocol.MessageType.RESUME_TASK)
-                put("data", data)
-                if (jobId != null) {
-                    put("job_id", jobId)
-                }
-                put("timestamp", System.currentTimeMillis())
-            }.toString()
-            
-            // Process the task resumption through TaskProcessor
-            val response = taskProcessor.processTaskMessage(taskMessage)
-            
-            // Send response back to backend
-            response?.let { resp ->
-                sendTaskResponseWithSizeGuard(taskId, messageData.jobId, resp)
-                Log.d(TAG, "Task result sent (resumed)")
-            }
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling task resumption", e)
-            
-            // Send error response
-            val errorResponse = MessageProtocol.createTaskErrorMessage(
-                taskId = data?.optString("task_id", "") ?: "unknown",
-                jobId = messageData.jobId,
-                error = "Task resumption failed: ${e.message ?: "Unknown error"}"
-            )
-            sendMessage(errorResponse)
-        }
+        )
     }
-    
-    /**
-     * Handle ping message from foreman
-     */
-    private fun handlePing(messageData: MessageProtocol.MessageData) {
-        try {
-            Log.d(TAG, "Received ping, sending pong")
-            val workerId = workerIdManager.getCurrentWorkerId() ?: "unknown"
-            val pongMessage = MessageProtocol.createPongMessage(workerId, context)
-            sendMessage(pongMessage)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling ping", e)
-        }
+
+    private fun handlePing() {
+        val workerId = workerIdManager.getOrGenerateWorkerId()
+        val metrics = DeviceInfoCollector(context).getPerformanceMetrics().toMap()
+        val pong = JSONObject().apply {
+            put("type", MessageType.PONG)
+            put("timestamp", System.currentTimeMillis())
+            put("data", JSONObject().apply {
+                put("worker_id", workerId)
+                put("status", "online")
+                metrics.forEach { (key, value) -> put(key, value) }
+            })
+        }.toString()
+        sendMessage(pong)
     }
-    
-    /**
-     * Start heartbeat to keep connection alive
-     */
+
+    private fun handleCheckpointAck(message: InboundMessage) {
+        val taskId = message.data?.optString("task_id").orEmpty()
+        val checkpointId = message.data?.optString("checkpoint_id").orEmpty()
+        Log.d(TAG, "Checkpoint $checkpointId acknowledged for task $taskId")
+    }
+
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = clientScope.launch {
-            // Wait a bit before sending first heartbeat to ensure connection is stable
-            delay(5000)
-            
-            while (isConnected.get() && isRunning.get()) {
+            delay(5_000L)
+            while (isRunning.get() && isConnected.get()) {
                 try {
-                    if (isConnected.get()) {
-                        val workerId = workerIdManager.getCurrentWorkerId() ?: "unknown"
-                        val taskStatus = taskProcessor.getCurrentTaskStatus()
-                        val currentTaskId = taskStatus["current_task_id"] as? String
-                        val currentJobId = taskStatus["current_job_id"] as? String
-                        
-                        val heartbeatMessage = MessageProtocol.createHeartbeatMessage(
-                            workerId,
-                            currentTaskId,
-                            currentJobId,
-                            context
-                        )
-                        
-                        sendMessage(heartbeatMessage)
-                        val taskInfo = if (currentTaskId.isNullOrEmpty()) "No task" else currentTaskId
-                        Log.d(TAG, "Heartbeat sent - Worker: $workerId, Task: $taskInfo")
-                    }
+                    sendHeartbeatMessage()
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error sending heartbeat", e)
+                    Log.e(TAG, "Failed to send heartbeat", e)
                 }
-                
+
                 delay(HEARTBEAT_INTERVAL)
             }
         }
     }
-    
-    /**
-     * Stop heartbeat
-     */
+
     private fun stopHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = null
     }
 
-    private fun sendTaskResponseWithSizeGuard(taskId: String, jobId: String?, response: String) {
+    private fun sendHeartbeatMessage() {
+        val workerId = workerIdManager.getOrGenerateWorkerId()
+        val taskStatus = taskExecutor.getCurrentTaskStatus()
+        val heartbeat = JSONObject().apply {
+            put("type", MessageType.WORKER_HEARTBEAT)
+            put("job_id", taskStatus["current_job_id"] as? String)
+            put("timestamp", System.currentTimeMillis())
+            put("data", JSONObject().apply {
+                put("worker_id", workerId)
+                put("status", if (taskStatus["is_busy"] == true) "busy" else "online")
+                put("current_task", taskStatus["current_task_id"] as? String)
+                put("progress_percent", normalizeProgressValue(taskStatus["progress_percent"]))
+            })
+        }.toString()
+
+        sendMessage(heartbeat)
+    }
+
+    private fun sendTaskResult(taskId: String, jobId: String?, result: TaskExecutionResult): Boolean {
+        val payload = JSONObject().apply {
+            put("type", MessageType.TASK_RESULT)
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
+            put("data", JSONObject().apply {
+                put("task_id", taskId)
+                put("result", normalizeResultValue(result.result))
+                put("execution_time", result.executionTime)
+                result.recoveryStatus?.let { put("recovery_status", it) }
+            })
+        }.toString()
+
+        val sent = sendTaskResponseWithSizeGuard(taskId, jobId, payload)
+        if (sent) {
+            checkpointStateHolder.clear()
+        }
+        return sent
+    }
+
+    private fun sendTaskError(taskId: String, jobId: String?, error: String): Boolean {
+        val payload = JSONObject().apply {
+            put("type", MessageType.TASK_ERROR)
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
+            put("data", JSONObject().apply {
+                put("task_id", taskId)
+                put("error", error)
+            })
+        }.toString()
+
+        val sent = sendMessage(payload)
+        if (sent) {
+            checkpointStateHolder.clear()
+        }
+        return sent
+    }
+
+    private suspend fun sendCheckpoint(checkpoint: CheckpointMessage): Boolean {
+        val decodedState = ProtocolCodec.decodeCheckpointState(checkpoint.deltaDataHex)
+        checkpointStateHolder.update(
+            checkpointId = checkpoint.checkpointId.toString(),
+            taskId = checkpoint.taskId,
+            jobId = checkpoint.jobId,
+            deltaDataHex = checkpoint.deltaDataHex,
+            progressPercent = checkpoint.progressPercent,
+            stateVars = decodedState?.let { ProtocolCodec.jsonObjectToMap(it) }.orEmpty()
+        )
+
+        val sent = sendMessage(checkpoint.toJsonString())
+        if (!sent) {
+            Log.w(TAG, "Checkpoint for task ${checkpoint.taskId} could not be sent because the socket is unavailable")
+        }
+        return sent
+    }
+
+    private fun sendTaskResponseWithSizeGuard(taskId: String, jobId: String?, response: String): Boolean {
         val responseSize = response.toByteArray(Charsets.UTF_8).size
         if (responseSize <= MAX_OUTBOUND_MESSAGE_BYTES) {
-            sendMessage(response)
-            return
+            return sendMessage(response)
         }
 
-        Log.w(TAG, "Task response too large (${responseSize}B > ${MAX_OUTBOUND_MESSAGE_BYTES}B), uploading result payload to HTTP server")
+        Log.w(TAG, "Task response too large (${responseSize}B), uploading over HTTP")
         val upload = uploadOversizedTaskResponse(taskId, response)
         if (!upload.fileUrl.isNullOrBlank()) {
-            val offloadedMessage = createOffloadedTaskResultMessage(
-                taskId = taskId,
-                jobId = jobId,
-                fileUrl = upload.fileUrl,
-                originalBytes = responseSize
-            )
-            sendMessage(offloadedMessage)
-            Log.i(TAG, "Oversized task result offloaded: taskId=$taskId file_url=${upload.fileUrl}")
-            return
+            val offloadedMessage = createOffloadedTaskResultMessage(taskId, jobId, upload.fileUrl, responseSize)
+            return sendMessage(offloadedMessage)
         }
 
         Log.e(TAG, "Failed to offload oversized task result: ${upload.error ?: "unknown upload error"}")
-        val compactError = MessageProtocol.createTaskErrorMessage(
+        return sendTaskError(
             taskId = taskId,
             jobId = jobId,
             error = "Task result too large for transport (${responseSize} bytes) and upload failed: ${upload.error ?: "unknown upload error"}"
         )
-        sendMessage(compactError)
+    }
+
+    fun sendImmediateHeartbeat() {
+        if (!isConnected.get()) {
+            Log.w(TAG, "Cannot send heartbeat because the socket is not connected")
+            return
+        }
+
+        clientScope.launch {
+            try {
+                sendHeartbeatMessage()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send immediate heartbeat", e)
+            }
+        }
+    }
+
+    fun getConnectionStatus(): Map<String, Any> {
+        return mapOf(
+            "is_connected" to isConnected.get(),
+            "is_connecting" to isConnecting.get(),
+            "is_running" to isRunning.get(),
+            "worker_id" to workerIdManager.getOrGenerateWorkerId(),
+            "current_url" to (currentUrl.get() ?: ""),
+            "checkpoint_cached" to (checkpointStateHolder.get() != null),
+            "heartbeat_active" to (heartbeatJob?.isActive == true)
+        )
+    }
+
+    suspend fun testWebSocket(): Map<String, Any> {
+        return withContext(Dispatchers.IO) {
+            mapOf(
+                "status" to if (isConnected.get()) "success" else "error",
+                "message" to if (isConnected.get()) "WebSocket connected" else "WebSocket disconnected",
+                "is_connected" to isConnected.get(),
+                "is_running" to isRunning.get(),
+                "worker_id" to workerIdManager.getOrGenerateWorkerId(),
+                "checkpoint_cached" to (checkpointStateHolder.get() != null)
+            )
+        }
+    }
+
+    private fun sendMessage(message: String): Boolean {
+        val webSocket = webSocketRef.get()
+        if (!isConnected.get() || webSocket == null) {
+            Log.w(TAG, "Cannot send message because the socket is not connected")
+            return false
+        }
+
+        val sizeBytes = message.toByteArray(Charsets.UTF_8).size
+        if (sizeBytes > MAX_OUTBOUND_MESSAGE_BYTES) {
+            Log.e(TAG, "Refusing to send oversized WebSocket message (${sizeBytes}B)")
+            return false
+        }
+
+        return try {
+            webSocket.send(message)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send WebSocket message", e)
+            false
+        }
+    }
+
+    private fun normalizeResultValue(result: Any?): Any {
+        return when (result) {
+            null -> JSONObject()
+            is JSONObject, is JSONArray, is Number, is Boolean -> result
+            is Map<*, *> -> ProtocolCodec.mapToJsonObject(
+                result.entries
+                    .filter { it.key is String }
+                    .associate { it.key as String to it.value }
+            )
+            is String -> {
+                val trimmed = result.trim()
+                try {
+                    when {
+                        trimmed.startsWith("{") -> JSONObject(trimmed)
+                        trimmed.startsWith("[") -> JSONArray(trimmed)
+                        trimmed.isBlank() -> JSONObject()
+                        else -> result
+                    }
+                } catch (_: Exception) {
+                    result
+                }
+            }
+            else -> result.toString()
+        }
+    }
+
+    private fun normalizeProgressValue(value: Any?): Float {
+        return when (value) {
+            is Float -> value
+            is Double -> value.toFloat()
+            is Number -> value.toFloat()
+            is String -> value.toFloatOrNull() ?: 0f
+            else -> 0f
+        }
     }
 
     private fun uploadOversizedTaskResponse(taskId: String, response: String): UploadOutcome {
@@ -610,7 +648,9 @@ class WorkerWebSocketClient(
         originalBytes: Int
     ): String {
         return JSONObject().apply {
-            put("type", MessageProtocol.MessageType.TASK_RESULT)
+            put("type", MessageType.TASK_RESULT)
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
             put("data", JSONObject().apply {
                 put("task_id", taskId)
                 put("execution_time", 0.0)
@@ -624,171 +664,44 @@ class WorkerWebSocketClient(
                     }
                 )
             })
-            put("job_id", jobId)
-            put("timestamp", System.currentTimeMillis())
         }.toString()
     }
 
     private fun maybeNotifyDisconnected(wasConnected: Boolean, reason: String?) {
-        if (!wasConnected) return
-
-        val now = System.currentTimeMillis()
-        val prev = lastDisconnectNotificationAt.get()
-        if (now - prev < DISCONNECT_NOTIFY_COOLDOWN_MS) {
-            Log.d(TAG, "Skipping disconnect notification (cooldown active)")
+        if (!wasConnected) {
             return
         }
 
-        if (lastDisconnectNotificationAt.compareAndSet(prev, now)) {
+        val now = System.currentTimeMillis()
+        val previous = lastDisconnectNotificationAt.get()
+        if (now - previous < DISCONNECT_NOTIFY_COOLDOWN_MS) {
+            return
+        }
+
+        if (lastDisconnectNotificationAt.compareAndSet(previous, now)) {
             NotificationHelper.notifyWorkerDisconnected(context, reason)
         }
     }
-    
-    /**
-     * Schedule reconnection attempt
-     */
-    private fun scheduleReconnection(url: String) {
-        if (reconnectAttempts.get() >= MAX_RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "🚨 Max reconnection attempts reached, giving up")
-            return
-        }
 
-        if (reconnectJob?.isActive == true) {
-            Log.d(TAG, "Reconnection already scheduled; skipping duplicate schedule request")
-            return
-        }
-
-        reconnectJob = clientScope.launch {
-            val attempt = reconnectAttempts.incrementAndGet()
-            val delay = RECONNECT_DELAY * attempt // Exponential backoff
-            
-            Log.d(TAG, "Scheduling reconnection attempt $attempt in ${delay}ms")
-            delay(delay)
-            
-            if (isRunning.get() && !isConnected.get()) {
-                Log.d(TAG, "Attempting reconnection #$attempt")
-                // Run connect in a separate child so reconnect scheduling cancellation
-                // does not cancel an in-flight connection attempt.
-                clientScope.launch {
-                    connect(url)
-                }
-            }
-
-            reconnectJob = null
-        }
-    }
-    
-    /**
-     * Test WebSocket functionality
-     */
-    suspend fun testWebSocket(): Map<String, Any> {
-        return withContext(Dispatchers.IO) {
-            try {
-                Log.d(TAG, "Testing WebSocket functionality...")
-                
-                // Test task processor
-                val processorTest = taskProcessor.testTaskProcessing()
-                
-                // Test status request
-                val statusMessage = """
-                    {
-                        "type": "get_status",
-                        "data": {}
-                    }
-                """.trimIndent()
-                
-                val statusResponse = taskProcessor.processTaskMessage(statusMessage)
-                val statusJson = org.json.JSONObject(statusResponse ?: "{}")
-                
-                val isSuccess = processorTest["status"] == "success" && 
-                               statusJson.optString("status") == "ready"
-                
-                mapOf<String, Any>(
-                    "status" to if (isSuccess) "success" else "error",
-                    "message" to if (isSuccess) "WebSocket test passed" else "WebSocket test failed",
-                    "processor_test" to processorTest,
-                    "status_response" to statusJson.toString(),
-                    "is_connected" to isConnected.get(),
-                    "is_running" to isRunning.get()
-                )
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "WebSocket test failed", e)
-                mapOf<String, Any>(
-                    "status" to "error",
-                    "message" to "WebSocket test failed: ${e.message ?: "Unknown error"}",
-                    "error" to e.toString()
-                )
-            }
-        }
-    }
-    
-    /**
-     * Get connection status
-     */
-    fun getConnectionStatus(): Map<String, Any> {
-        return mapOf<String, Any>(
-            "is_connected" to isConnected.get(),
-            "is_running" to isRunning.get(),
-            "reconnect_attempts" to reconnectAttempts.get(),
-            "worker_id" to (workerIdManager.getCurrentWorkerId() ?: "unknown"),
-            "heartbeat_active" to (heartbeatJob?.isActive ?: false),
-            "last_heartbeat" to System.currentTimeMillis()
-        )
-    }
-    
-    /**
-     * Send immediate heartbeat for testing
-     */
-    fun sendImmediateHeartbeat() {
-        if (isConnected.get()) {
-            val workerId = workerIdManager.getCurrentWorkerId() ?: "unknown"
-            val taskStatus = taskProcessor.getCurrentTaskStatus()
-            val currentTaskId = taskStatus["current_task_id"] as? String
-            val currentJobId = taskStatus["current_job_id"] as? String
-            
-            val heartbeatMessage = MessageProtocol.createHeartbeatMessage(workerId, currentTaskId, currentJobId, context)
-            sendMessage(heartbeatMessage)
-            val taskInfo = if (currentTaskId.isNullOrEmpty()) "No task" else currentTaskId
-            Log.d(TAG, "Immediate heartbeat sent - Worker: $workerId, Task: $taskInfo")
-        } else {
-            Log.w(TAG, "Cannot send heartbeat - not connected")
-        }
-    }
-    
-    /**
-     * Add listener for WebSocket events
-     */
     fun addListener(listener: WorkerWebSocketListener) {
         listeners.add(listener)
     }
-    
-    /**
-     * Remove listener
-     */
+
     fun removeListener(listener: WorkerWebSocketListener) {
         listeners.remove(listener)
     }
-    
-    /**
-     * Cleanup resources
-     */
+
     fun cleanup() {
         try {
-            Log.d(TAG, "Cleaning up WebSocket client...")
             disconnect()
             clientScope.cancel()
-            taskProcessor.cleanup()
+            taskExecutor.cleanup()
             listeners.clear()
-            Log.d(TAG, "WebSocket client cleaned up")
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }
     }
-    
-    /**
-     * Listener interface for WebSocket events
-     */
+
     interface WorkerWebSocketListener {
         fun onConnected()
         fun onDisconnected()

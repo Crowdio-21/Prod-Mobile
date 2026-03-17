@@ -3,6 +3,7 @@ package com.example.mcc_phase3.execution
 import android.content.Context
 import android.util.Base64
 import android.util.Log
+import com.example.mcc_phase3.communication.ProtocolCodec
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.communication.MessageProtocol
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
@@ -36,7 +37,7 @@ import java.util.concurrent.atomic.AtomicReference
  * - Configuring checkpointing from task_metadata
  * - NOT executing Python code (delegated to PythonExecutor)
  */
-class TaskProcessor(private val context: Context) {
+class TaskProcessor(private val context: Context) : TaskExecutor {
     
     companion object {
         private const val TAG = "TaskProcessor"
@@ -125,6 +126,16 @@ class TaskProcessor(private val context: Context) {
         val error: String?
     )
 
+    private data class StoredTaskExecution(
+        val taskId: String,
+        val jobId: String?,
+        val funcCode: String,
+        val taskArgsJson: String,
+        val taskMetadataJson: String?
+    )
+
+    private val storedExecutions = ConcurrentHashMap<String, StoredTaskExecution>()
+
     init {
         // Single consumer coroutine — processes queued tasks one at a time
         processorScope.launch {
@@ -147,7 +158,7 @@ class TaskProcessor(private val context: Context) {
     /**
      * Initialize the task processor
      */
-    suspend fun initialize(): Boolean {
+    override suspend fun initialize(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing TaskProcessor...")
@@ -172,6 +183,154 @@ class TaskProcessor(private val context: Context) {
                 Log.e(TAG, " Failed to initialize TaskProcessor", e)
                 false
             }
+        }
+    }
+
+    override suspend fun executeTask(
+        taskId: String,
+        jobId: String?,
+        payload: JSONObject,
+        onResult: suspend (TaskExecutionResult) -> Unit,
+        onError: suspend (String) -> Unit,
+        onCheckpoint: suspend (CheckpointMessage) -> Unit
+    ) {
+        setCheckpointCallback(onCheckpoint)
+        val response = processTaskAssignment(payload, jobId)
+        dispatchProcessorResponse(taskId, jobId, response, onResult, onError)
+    }
+
+    override suspend fun resumeFromCheckpoint(
+        taskId: String,
+        jobId: String?,
+        checkpointId: String,
+        deltaDataHex: String,
+        stateVars: Map<String, Any?>,
+        onResult: suspend (TaskExecutionResult) -> Unit,
+        onError: suspend (String) -> Unit,
+        onCheckpoint: suspend (CheckpointMessage) -> Unit
+    ) {
+        setCheckpointCallback(onCheckpoint)
+
+        val storedExecution = storedExecutions[taskId]
+        if (storedExecution == null) {
+            onError(
+                "No cached execution context found for task $taskId. " +
+                    "Cold-start resume requires the foreman to resend func_code and task_args."
+            )
+            return
+        }
+
+        if (isTaskRunning.get()) {
+            val activeTaskId = currentTaskId.get()
+            if (activeTaskId == taskId) {
+                Log.i(TAG, "Ignoring duplicate resume request for task $taskId because it is already running locally")
+                return
+            }
+
+            onError("Worker is busy with task $activeTaskId")
+            return
+        }
+
+        val checkpointStateJson = ProtocolCodec.decodeCheckpointState(deltaDataHex)
+            ?: ProtocolCodec.mapToJsonObject(stateVars)
+
+        val taskMetadataJson = storedExecution.taskMetadataJson?.let { JSONObject(it) }
+        val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
+        val checkpointCount = checkpointId.toIntOrNull() ?: 0
+
+        currentTaskId.set(taskId)
+        currentJobId.set(jobId)
+        isTaskRunning.set(true)
+
+        try {
+            checkpointCallback?.let { callback ->
+                if (taskMetadataJson != null) {
+                    checkpointHandler.configure(taskMetadata)
+                }
+
+                if (checkpointHandler.isCheckpointingEnabled()) {
+                    pythonExecutor.setCheckpointHandler(checkpointHandler)
+                    checkpointHandler.initializeFromCheckpoint(checkpointCount)
+                    checkpointHandler.startCheckpointMonitoring(
+                        taskId = taskId,
+                        jobId = jobId,
+                        workerId = workerIdManager.getCurrentWorkerId(),
+                        scope = processorScope,
+                        sendCheckpoint = callback,
+                        pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
+                    )
+                }
+            }
+
+            val executionResult = pythonExecutor.executeCodeWithRestoredState(
+                funcCode = storedExecution.funcCode,
+                checkpointStateJson = checkpointStateJson.toString(),
+                taskArgsJson = storedExecution.taskArgsJson
+            )
+
+            val executionStatus = executionResult["status"] as? String ?: "error"
+            if (executionStatus == "error") {
+                onError(executionResult["message"] as? String ?: "Task resumption failed")
+                return
+            }
+
+            onResult(
+                TaskExecutionResult(
+                    result = executionResult["result"],
+                    executionTime = 0.0,
+                    recoveryStatus = "resumed"
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resuming task $taskId from checkpoint $checkpointId", e)
+            onError("Task resumption failed: ${e.message ?: "Unknown error"}")
+        } finally {
+            checkpointHandler.stopCheckpointMonitoring()
+            pythonExecutor.setCheckpointHandler(null)
+            currentTaskId.set(null)
+            currentJobId.set(null)
+            isTaskRunning.set(false)
+        }
+    }
+
+    private suspend fun dispatchProcessorResponse(
+        taskId: String,
+        jobId: String?,
+        response: String,
+        onResult: suspend (TaskExecutionResult) -> Unit,
+        onError: suspend (String) -> Unit
+    ) {
+        try {
+            val responseJson = JSONObject(response)
+            val responseType = responseJson.optString("type")
+            val data = responseJson.optJSONObject("data")
+
+            when (responseType) {
+                MessageProtocol.MessageType.TASK_RESULT -> {
+                    onResult(
+                        TaskExecutionResult(
+                            result = data?.opt("result"),
+                            executionTime = data?.optDouble("execution_time", 0.0) ?: 0.0,
+                            recoveryStatus = data?.optString("recovery_status")?.takeIf { it.isNotBlank() }
+                        )
+                    )
+                }
+
+                MessageProtocol.MessageType.TASK_ERROR, RESPONSE_TYPE_ERROR -> {
+                    onError(
+                        data?.optString("error")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: responseJson.optString("message", "Task execution failed for $taskId")
+                    )
+                }
+
+                else -> {
+                    onError("Unexpected task processor response type '$responseType' for task $taskId")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to translate task processor response for task $taskId", e)
+            onError("Failed to parse task processor response for task $taskId")
         }
     }
     
@@ -335,6 +494,14 @@ class TaskProcessor(private val context: Context) {
             } else {
                 funcCode
             }
+
+            storedExecutions[taskId] = StoredTaskExecution(
+                taskId = taskId,
+                jobId = jobId,
+                funcCode = finalFuncCode,
+                taskArgsJson = finalTaskArgs,
+                taskMetadataJson = taskMetadataJson?.toString()
+            )
             
             // Detect and store work type before execution starts
             currentWorkType.set(detectWorkType(finalFuncCode))
@@ -1502,7 +1669,7 @@ class TaskProcessor(private val context: Context) {
     /**
      * Get current task status
      */
-    fun getCurrentTaskStatus(): Map<String, Any> {
+    override fun getCurrentTaskStatus(): Map<String, Any> {
         // Capture all atomic values at once to avoid race conditions
         val isBusy = isTaskRunning.get()
         val taskId = currentTaskId.get() ?: ""
@@ -1697,7 +1864,7 @@ class TaskProcessor(private val context: Context) {
     /**
      * Cleanup resources
      */
-    fun cleanup() {
+    override fun cleanup() {
         try {
             Log.d(TAG, "Cleaning up TaskProcessor...")
             checkpointHandler.stopCheckpointMonitoring()
