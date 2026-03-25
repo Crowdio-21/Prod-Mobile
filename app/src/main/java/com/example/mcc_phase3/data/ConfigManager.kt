@@ -233,6 +233,7 @@ class ConfigManager private constructor(context: Context) {
             - Stat Service Port: ${getStatServicePort()}
             - Stat Service URL: ${getStatServiceURL()}
             - Model Store Base URL: ${getModelStoreBaseUrl().ifBlank { "(use Foreman IP)" }}
+            - Working Directory: ${getWorkingDir().ifBlank { "(not set)" }}
             - Is Configured: ${isForemanConfigured()}
         """.trimIndent()
     }
