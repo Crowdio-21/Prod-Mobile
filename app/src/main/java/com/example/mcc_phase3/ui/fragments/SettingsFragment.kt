@@ -6,19 +6,23 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.os.IBinder
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import com.example.mcc_phase3.R
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.services.MobileWorkerService
 import com.example.mcc_phase3.utils.ThemeManager
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.switchmaterial.SwitchMaterial
@@ -32,9 +36,34 @@ class SettingsFragment : Fragment() {
     private lateinit var foremanIpText: MaterialTextView
     private lateinit var workerNameCard: MaterialCardView
     private lateinit var workerNameText: MaterialTextView
+    private lateinit var imageDirectoryCard: MaterialCardView
+    private lateinit var imageDirectoryText: MaterialTextView
+    private lateinit var clearImageDirectoryButton: MaterialButton
     private lateinit var notificationsSwitch: SwitchMaterial
     private lateinit var themeToggleGroup: MaterialButtonToggleGroup
     private lateinit var workerIdManager: WorkerIdManager
+
+    private val imageDirectoryPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri == null) {
+                Toast.makeText(requireContext(), "Folder selection cancelled", Toast.LENGTH_SHORT).show()
+                return@registerForActivityResult
+            }
+
+            try {
+                // Persist access so workers can keep using the folder across app restarts.
+                requireContext().contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {
+                // Some providers may not expose persistable permission flags.
+            }
+
+            configManager.setWorkingDir(uri.toString())
+            loadSettings()
+            Toast.makeText(requireContext(), "Image directory updated", Toast.LENGTH_SHORT).show()
+        }
 
     // Service binding so we can reconnect the worker when the address changes
     private var workerService: MobileWorkerService? = null
@@ -83,6 +112,9 @@ class SettingsFragment : Fragment() {
         foremanIpText = view.findViewById(R.id.foreman_ip_text)
         workerNameCard = view.findViewById(R.id.worker_name_card)
         workerNameText = view.findViewById(R.id.worker_name_text)
+        imageDirectoryCard = view.findViewById(R.id.image_directory_card)
+        imageDirectoryText = view.findViewById(R.id.image_directory_text)
+        clearImageDirectoryButton = view.findViewById(R.id.clear_image_directory_button)
         notificationsSwitch = view.findViewById(R.id.notifications_switch)
         themeToggleGroup = view.findViewById(R.id.theme_toggle_group)
         
@@ -109,6 +141,10 @@ class SettingsFragment : Fragment() {
         } else {
             workerNameText.text = workerId
         }
+
+        val workingDir = configManager.getWorkingDir().trim()
+        imageDirectoryText.text = formatWorkingDirectoryForDisplay(workingDir)
+        clearImageDirectoryButton.visibility = if (workingDir.isBlank()) View.GONE else View.VISIBLE
         
         notificationsSwitch.isChecked = sharedPreferences.getBoolean("notifications_enabled", true)
 
@@ -129,6 +165,14 @@ class SettingsFragment : Fragment() {
         workerNameCard.setOnClickListener {
             showWorkerNameDialog()
         }
+
+        imageDirectoryCard.setOnClickListener {
+            launchImageDirectoryPicker()
+        }
+
+        clearImageDirectoryButton.setOnClickListener {
+            clearImageDirectory()
+        }
         
         notificationsSwitch.setOnCheckedChangeListener { _, isChecked ->
             sharedPreferences.edit().putBoolean("notifications_enabled", isChecked).apply()
@@ -142,6 +186,44 @@ class SettingsFragment : Fragment() {
                 else              -> ThemeManager.ThemeMode.SYSTEM
             }
             ThemeManager.setThemeMode(mode)
+        }
+    }
+
+    private fun launchImageDirectoryPicker() {
+        val current = configManager.getWorkingDir().trim()
+        val initialUri = if (current.startsWith("content://")) Uri.parse(current) else null
+        imageDirectoryPickerLauncher.launch(initialUri)
+    }
+
+    private fun clearImageDirectory() {
+        val current = configManager.getWorkingDir().trim()
+        if (current.startsWith("content://")) {
+            try {
+                requireContext().contentResolver.releasePersistableUriPermission(
+                    Uri.parse(current),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+                // Ignore cleanup failures; we still clear app preference.
+            }
+        }
+
+        configManager.setWorkingDir("")
+        loadSettings()
+        Toast.makeText(requireContext(), "Image directory cleared", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun formatWorkingDirectoryForDisplay(uriString: String): String {
+        if (uriString.isBlank()) return "Not selected"
+        if (!uriString.startsWith("content://")) return uriString
+
+        return try {
+            val uri = Uri.parse(uriString)
+            val docId = DocumentsContract.getTreeDocumentId(uri)
+            val readableDocId = Uri.decode(docId)
+            "Selected folder: $readableDocId"
+        } catch (_: Exception) {
+            uriString
         }
     }
     

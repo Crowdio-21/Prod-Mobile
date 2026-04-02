@@ -1,7 +1,9 @@
 package com.example.mcc_phase3.execution
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
+import com.example.mcc_phase3.communication.ProtocolCodec
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.communication.DnnStateStore
 import com.example.mcc_phase3.communication.MessageProtocol
@@ -10,11 +12,22 @@ import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.checkpoint.TaskMetadata
 import com.example.mcc_phase3.model.ModelArtifactCache
 import com.example.mcc_phase3.model.ModelArtifactMetadata
+import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.utils.EventLogger
 import com.example.mcc_phase3.utils.NotificationHelper
+import android.os.SystemClock
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.ConcurrentHashMap
@@ -28,13 +41,21 @@ import java.util.concurrent.ConcurrentHashMap
  * - Configuring checkpointing from task_metadata
  * - NOT executing Python code (delegated to PythonExecutor)
  */
-class TaskProcessor(private val context: Context) {
+class TaskProcessor(private val context: Context) : TaskExecutor {
     
     companion object {
         private const val TAG = "TaskProcessor"
 
         /** Maximum wall-clock time (ms) a single task may run before it is force-cancelled. */
         private const val TASK_TIMEOUT_MS = 10 * 60 * 1000L  // 10 minutes
+        private const val MAX_TRANSIENT_RETRIES = 1
+        // Keep websocket payloads small for mobile reliability. Inline base64 tensor blobs
+        // should be avoided; pass references/URIs instead.
+        private const val MAX_OUTPUT_TENSOR_B64_CHARS = 700 * 1024
+        private const val DEFAULT_TENSOR_UPLOAD_PORT = 8001
+        private const val TENSOR_UPLOAD_PATH = "/upload"
+        private const val DEFAULT_MODEL_ARTIFACT_HTTP_PORT = 8001
+        private const val DEFAULT_MODEL_STORE_HTTP_PREFIX = "/.model_store"
 
         // Task types
         private const val TASK_TYPE_ASSIGN = "assign_task"
@@ -51,6 +72,14 @@ class TaskProcessor(private val context: Context) {
     private val workerIdManager = WorkerIdManager.getInstance(context)
     private val dnnStateStore = DnnStateStore(context)
     private val pythonExecutor = PythonExecutor(context)
+    private val modelRepository = ModelRepository(context)
+    private val configManager = ConfigManager.getInstance(context)
+    private val tensorUploadClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
     private val isInitialized = AtomicBoolean(false)
     
     // Checkpoint handler for periodic progress reporting
@@ -84,11 +113,62 @@ class TaskProcessor(private val context: Context) {
 
     // Work type detected from incoming func_code
     private val currentWorkType = AtomicReference<String>("Other")
+    private val completedPartitionIdxByJob = ConcurrentHashMap<String, Int>()
+
+    // --------------- Task queue for DNN parallel branches ---------------
+    // When a task arrives while the worker is busy, it is queued here and
+    // drained sequentially so no task is ever rejected.
+    private data class QueuedTask(val data: JSONObject, val jobId: String?, val result: CompletableDeferred<String>)
+    private val taskQueue = Channel<QueuedTask>(Channel.UNLIMITED)
+
+    private data class StageInfo(
+        val stageName: String,
+        val partitionIdx: Int? = null
+    )
+
+    private data class TflitePreparationResult(
+        val taskArgs: String,
+        val telemetry: JSONObject?
+    )
+
+    private data class TensorUploadResult(
+        val fileUrl: String?,
+        val error: String?
+    )
+
+    private data class StoredTaskExecution(
+        val taskId: String,
+        val jobId: String?,
+        val funcCode: String,
+        val taskArgsJson: String,
+        val taskMetadataJson: String?
+    )
+
+    private val storedExecutions = ConcurrentHashMap<String, StoredTaskExecution>()
+
+    init {
+        // Single consumer coroutine — processes queued tasks one at a time
+        processorScope.launch {
+            for (queued in taskQueue) {
+                try {
+                    val response = processTaskAssignmentInternal(queued.data, queued.jobId)
+                    queued.result.complete(response)
+                } catch (e: Exception) {
+                    val errorResp = MessageProtocol.createTaskErrorMessage(
+                        taskId = queued.data.optString("task_id", "unknown"),
+                        jobId = queued.jobId,
+                        error = "Queued task failed: ${e.message}"
+                    )
+                    queued.result.complete(errorResp)
+                }
+            }
+        }
+    }
     
     /**
      * Initialize the task processor
      */
-    suspend fun initialize(): Boolean {
+    override suspend fun initialize(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing TaskProcessor...")
@@ -97,6 +177,12 @@ class TaskProcessor(private val context: Context) {
                 if (!pythonInitialized) {
                     Log.e(TAG, "Failed to initialize Python executor")
                     return@withContext false
+                }
+
+                try {
+                    modelRepository.cleanupOnStartup()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Model cache startup cleanup failed: ${e.message}")
                 }
                 
                 isInitialized.set(true)
@@ -107,6 +193,154 @@ class TaskProcessor(private val context: Context) {
                 Log.e(TAG, " Failed to initialize TaskProcessor", e)
                 false
             }
+        }
+    }
+
+    override suspend fun executeTask(
+        taskId: String,
+        jobId: String?,
+        payload: JSONObject,
+        onResult: suspend (TaskExecutionResult) -> Unit,
+        onError: suspend (String) -> Unit,
+        onCheckpoint: suspend (CheckpointMessage) -> Unit
+    ) {
+        setCheckpointCallback(onCheckpoint)
+        val response = processTaskAssignment(payload, jobId)
+        dispatchProcessorResponse(taskId, jobId, response, onResult, onError)
+    }
+
+    override suspend fun resumeFromCheckpoint(
+        taskId: String,
+        jobId: String?,
+        checkpointId: String,
+        deltaDataHex: String,
+        stateVars: Map<String, Any?>,
+        onResult: suspend (TaskExecutionResult) -> Unit,
+        onError: suspend (String) -> Unit,
+        onCheckpoint: suspend (CheckpointMessage) -> Unit
+    ) {
+        setCheckpointCallback(onCheckpoint)
+
+        val storedExecution = storedExecutions[taskId]
+        if (storedExecution == null) {
+            onError(
+                "No cached execution context found for task $taskId. " +
+                    "Cold-start resume requires the foreman to resend func_code and task_args."
+            )
+            return
+        }
+
+        if (isTaskRunning.get()) {
+            val activeTaskId = currentTaskId.get()
+            if (activeTaskId == taskId) {
+                Log.i(TAG, "Ignoring duplicate resume request for task $taskId because it is already running locally")
+                return
+            }
+
+            onError("Worker is busy with task $activeTaskId")
+            return
+        }
+
+        val checkpointStateJson = ProtocolCodec.decodeCheckpointState(deltaDataHex)
+            ?: ProtocolCodec.mapToJsonObject(stateVars)
+
+        val taskMetadataJson = storedExecution.taskMetadataJson?.let { JSONObject(it) }
+        val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
+        val checkpointCount = checkpointId.toIntOrNull() ?: 0
+
+        currentTaskId.set(taskId)
+        currentJobId.set(jobId)
+        isTaskRunning.set(true)
+
+        try {
+            checkpointCallback?.let { callback ->
+                if (taskMetadataJson != null) {
+                    checkpointHandler.configure(taskMetadata)
+                }
+
+                if (checkpointHandler.isCheckpointingEnabled()) {
+                    pythonExecutor.setCheckpointHandler(checkpointHandler)
+                    checkpointHandler.initializeFromCheckpoint(checkpointCount)
+                    checkpointHandler.startCheckpointMonitoring(
+                        taskId = taskId,
+                        jobId = jobId,
+                        workerId = workerIdManager.getCurrentWorkerId(),
+                        scope = processorScope,
+                        sendCheckpoint = callback,
+                        pollState = { pythonExecutor.pollAndUpdateCheckpointState() }
+                    )
+                }
+            }
+
+            val executionResult = pythonExecutor.executeCodeWithRestoredState(
+                funcCode = storedExecution.funcCode,
+                checkpointStateJson = checkpointStateJson.toString(),
+                taskArgsJson = storedExecution.taskArgsJson
+            )
+
+            val executionStatus = executionResult["status"] as? String ?: "error"
+            if (executionStatus == "error") {
+                onError(executionResult["message"] as? String ?: "Task resumption failed")
+                return
+            }
+
+            onResult(
+                TaskExecutionResult(
+                    result = executionResult["result"],
+                    executionTime = 0.0,
+                    recoveryStatus = "resumed"
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resuming task $taskId from checkpoint $checkpointId", e)
+            onError("Task resumption failed: ${e.message ?: "Unknown error"}")
+        } finally {
+            checkpointHandler.stopCheckpointMonitoring()
+            pythonExecutor.setCheckpointHandler(null)
+            currentTaskId.set(null)
+            currentJobId.set(null)
+            isTaskRunning.set(false)
+        }
+    }
+
+    private suspend fun dispatchProcessorResponse(
+        taskId: String,
+        jobId: String?,
+        response: String,
+        onResult: suspend (TaskExecutionResult) -> Unit,
+        onError: suspend (String) -> Unit
+    ) {
+        try {
+            val responseJson = JSONObject(response)
+            val responseType = responseJson.optString("type")
+            val data = responseJson.optJSONObject("data")
+
+            when (responseType) {
+                MessageProtocol.MessageType.TASK_RESULT -> {
+                    onResult(
+                        TaskExecutionResult(
+                            result = data?.opt("result"),
+                            executionTime = data?.optDouble("execution_time", 0.0) ?: 0.0,
+                            recoveryStatus = data?.optString("recovery_status")?.takeIf { it.isNotBlank() }
+                        )
+                    )
+                }
+
+                MessageProtocol.MessageType.TASK_ERROR, RESPONSE_TYPE_ERROR -> {
+                    onError(
+                        data?.optString("error")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: responseJson.optString("message", "Task execution failed for $taskId")
+                    )
+                }
+
+                else -> {
+                    onError("Unexpected task processor response type '$responseType' for task $taskId")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to translate task processor response for task $taskId", e)
+            onError("Failed to parse task processor response for task $taskId")
         }
     }
     
@@ -158,35 +392,51 @@ class TaskProcessor(private val context: Context) {
     }
     
     /**
-     * Process task assignment from backend
+     * Process task assignment from backend.
+     * If the worker is idle the task runs immediately; otherwise it is queued
+     * and executed once the current (and any earlier queued) task completes.
      */
     private suspend fun processTaskAssignment(data: JSONObject?, jobId: String?): String {
         // Declare taskId outside try-catch so it's accessible in catch block
         val taskId = data?.optString("task_id", "") ?: ""
         
+        if (data == null) return createErrorResponse("No task data provided")
+        if (taskId.isEmpty()) return createErrorResponse("No task ID provided")
+
+        // If a task is already running, queue this one instead of rejecting it
+        if (isTaskRunning.get()) {
+            Log.i(TAG, "Worker busy with ${currentTaskId.get()}, queuing task $taskId")
+            EventLogger.info(EventLogger.Categories.TASK, "Task $taskId queued (worker busy)")
+            val deferred = CompletableDeferred<String>()
+            taskQueue.trySend(QueuedTask(data, jobId, deferred))
+            return deferred.await()
+        }
+
+        return processTaskAssignmentInternal(data, jobId)
+    }
+
+    /**
+     * Internal task execution — always called when the worker is free.
+     */
+    private suspend fun processTaskAssignmentInternal(data: JSONObject?, jobId: String?): String {
+        val taskId = data?.optString("task_id", "") ?: ""
+        
         return try {
-            if (data == null) {
-                return createErrorResponse("No task data provided")
-            }
-            
-            if (taskId.isEmpty()) {
-                return createErrorResponse("No task ID provided")
-            }
-            
-            // Check if we're already running a task
-            if (isTaskRunning.get()) {
-                Log.w(TAG, "Already running task ${currentTaskId.get()}, rejecting new task $taskId")
-                return createErrorResponse("Worker is busy with task ${currentTaskId.get()}")
-            }
-            
             Log.d(TAG, "Processing task assignment: $taskId")
             
             // Extract function code and task arguments (matching desktop worker format)
-            val funcCode = data.optString("func_code", "")
-            val taskArgs = data.optString("task_args", "")
+            val funcCode = data?.optString("func_code", "") ?: ""
+            val taskArgs = data?.optString("task_args", "") ?: ""
+            val stageInfo = inspectStage(funcCode, taskArgs)
+            val routePolicy = routePolicyForStage(stageInfo)
+            Log.i(TAG, "Stage detected: ${stageInfo.stageName} partition=${stageInfo.partitionIdx} route=$routePolicy")
+
+            if (stageInfo.stageName == "partition_model") {
+                Log.w(TAG, "partition_model should run on desktop TensorFlow worker; Android execution will use fallback behavior")
+            }
             
             // Parse task_metadata if present (declarative checkpointing configuration)
-            val taskMetadataJson = data.optJSONObject("task_metadata")
+            val taskMetadataJson = data?.optJSONObject("task_metadata")
             val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
             val executionContext = parseExecutionContext(data, taskMetadataJson)
             var modelPartitionId = executionContext.modelPartitionId
@@ -203,44 +453,76 @@ class TaskProcessor(private val context: Context) {
                 return createErrorResponse("No function code found in task")
             }
 
-            if (modelPartitionId.isBlank()) {
-                modelPartitionId = inferSingleCachedPartitionId()
-            }
-
-            val fallbackMode = dnnStateStore.getFallbackModeForTask(taskId)
-            val normalizedFallbackMode = normalizeFallbackMode(fallbackMode)
-
-            if (modelPartitionId.isNotBlank()) {
-                val currentWorkerId = workerIdManager.getCurrentWorkerId()
-                val assignedWorkerId = dnnStateStore.getAssignedWorkerForPartition(modelPartitionId)
-                val enforceAssignment = !isStandaloneFallbackMode(normalizedFallbackMode)
-                if (enforceAssignment && !assignedWorkerId.isNullOrBlank() && !currentWorkerId.isNullOrBlank() && assignedWorkerId != currentWorkerId) {
-                    Log.w(TAG, "Task $taskId partition $modelPartitionId is assigned to $assignedWorkerId, not $currentWorkerId")
-                    return MessageProtocol.createTaskErrorMessage(
-                        taskId = taskId,
-                        jobId = jobId,
-                        error = "Partition $modelPartitionId currently assigned to another worker"
-                    )
-                }
-            }
-
-            val modelMetadata = if (modelPartitionId.isNotBlank()) {
-                modelArtifactRegistry[modelPartitionId] ?: modelArtifactCache.getArtifact(modelPartitionId)
-            } else {
-                null
-            }
-
-            if (modelPartitionId.isNotBlank() && modelMetadata == null && fallbackMode.isNullOrBlank()) {
-                Log.e(TAG, "Model partition $modelPartitionId is required but not loaded")
+            if (!isStageOrderSatisfied(jobId, stageInfo)) {
+                val expected = ((completedPartitionIdxByJob[jobId] ?: -1) + 1)
                 return MessageProtocol.createTaskErrorMessage(
                     taskId = taskId,
                     jobId = jobId,
-                    error = "Required model partition '$modelPartitionId' not loaded yet"
+                    error = "Stage order violation: ${stageInfo.stageName} partition=${stageInfo.partitionIdx}, expected partition=$expected"
                 )
             }
+
+            val normalizedTaskArgs = normalizeTaskArgsForStage(taskArgs, stageInfo)
+            var modelTelemetry: JSONObject? = null
+            val finalTaskArgs = if (stageInfo.stageName == "tflite_partition") {
+                val prepared = prepareTflitePartitionArgs(normalizedTaskArgs, data, stageInfo.partitionIdx)
+                modelTelemetry = prepared.telemetry
+                prepared.taskArgs
+            } else {
+                normalizedTaskArgs
+            }
+
+            val finalFuncCode = if (stageInfo.stageName == "tflite_partition") {
+                val probe = pythonExecutor.probeTfliteBackend()
+                if (!probe.available) {
+                    return MessageProtocol.createTaskErrorMessage(
+                        taskId = taskId,
+                        jobId = jobId,
+                        error = "No usable TFLite backend on Android worker (backend=${probe.backend}). ${probe.details}"
+                    )
+                }
+                Log.i(TAG, "TFLite backend probe passed: backend=${probe.backend} details=${probe.details}")
+                // Rewrite payload so Android uses pre-resolved local model file.
+                val rewrittenCode = funcCode
+                    .replace(
+                        Regex("def\\s+run_tflite_partition\\s*\\(\\s*task_input\\s*\\):"),
+                        "def run_tflite_partition(task_input):\n    local_model_path = task_input.get('local_model_path')\n    if local_model_path and not task_input.get('tflite_b64_str'):\n        with open(local_model_path, 'rb') as _f:\n            task_input['tflite_b64_str'] = base64.b64encode(_f.read()).decode('utf-8')"
+                    )
+                    .replace(
+                        Regex("def\\s+_run_tflite\\s*\\(\\s*tflite_b64_str\\s*,\\s*input_array\\s*\\):"),
+                        "def _run_tflite(input_array):"
+                    )
+                    .replace(
+                        Regex("_run_tflite\\s*\\(\\s*tflite_b64_str\\s*,\\s*input_array\\s*\\)"),
+                        "_run_tflite(input_array)"
+                    )
+                    .replace(
+                        Regex("tflite_bytes\\s*=\\s*base64\\.b64decode\\(tflite_b64_str\\)"),
+                        "tflite_bytes = open(task_input['local_model_path'], 'rb').read()"
+                    )
+                val rewriteApplied = rewrittenCode != funcCode
+                val oldSigStillPresent = Regex("def\\s+_run_tflite\\s*\\(\\s*tflite_b64_str").containsMatchIn(rewrittenCode)
+                val oldCallStillPresent = Regex("_run_tflite\\s*\\(\\s*tflite_b64_str\\s*,").containsMatchIn(rewrittenCode)
+                val base64DecodeStillPresent = Regex("base64\\.b64decode\\(tflite_b64_str\\)").containsMatchIn(rewrittenCode)
+                Log.i(
+                    TAG,
+                    "TFLite payload rewrite applied=$rewriteApplied oldSigStillPresent=$oldSigStillPresent oldCallStillPresent=$oldCallStillPresent base64DecodeStillPresent=$base64DecodeStillPresent"
+                )
+                rewrittenCode
+            } else {
+                funcCode
+            }
+
+            storedExecutions[taskId] = StoredTaskExecution(
+                taskId = taskId,
+                jobId = jobId,
+                funcCode = finalFuncCode,
+                taskArgsJson = finalTaskArgs,
+                taskMetadataJson = taskMetadataJson?.toString()
+            )
             
             // Detect and store work type before execution starts
-            currentWorkType.set(detectWorkType(funcCode))
+            currentWorkType.set(detectWorkType(finalFuncCode))
             Log.d(TAG, "Work type detected: ${currentWorkType.get()} for task $taskId")
 
             // Set current task and job
@@ -327,29 +609,8 @@ class TaskProcessor(private val context: Context) {
                     }
                 }
                 
-                    val shouldRunNativeModel = when {
-                        modelMetadata == null -> false
-                        isNativeExecution && normalizedFallbackMode == null -> true
-                        isStandaloneFallbackMode(normalizedFallbackMode) -> true
-                        else -> false
-                    }
-
-                    val executionResult = if (shouldRunNativeModel) {
-                        if (!normalizedFallbackMode.isNullOrBlank()) {
-                            Log.i(TAG, "Applying fallback mode '$normalizedFallbackMode' with local native-model execution for task $taskId")
-                        }
-                        runNativeModelExecution(
-                            taskId = taskId,
-                            modelMetadata = modelMetadata!!,
-                            taskArgsJson = taskArgs,
-                            executionMode = executionContext.executionMode
-                        )
-                    } else {
-                    if (!normalizedFallbackMode.isNullOrBlank()) {
-                        Log.i(TAG, "Applying fallback mode '$normalizedFallbackMode' with Python execution for task $taskId")
-                    }
-                    pythonExecutor.executeCode(funcCode, taskArgs)
-                }
+                // Execute the function code (matching desktop worker format)
+                val executionResult = executeCodeWithRetry(finalFuncCode, finalTaskArgs, stageInfo)
 
                 val executionStatus = executionResult["status"] as? String ?: "error"
                 val executionMessage = executionResult["message"] as? String ?: "Unknown error"
@@ -366,10 +627,22 @@ class TaskProcessor(private val context: Context) {
                 } else {
                     // Ensure result is never null — fall back to empty JSON object
                     val rawResult = executionResult["result"]
-                    val safeResult: Any = when {
-                        rawResult == null -> "{}"
-                        rawResult is String && rawResult.isBlank() -> "{}"
-                        else -> rawResult
+                    val normalized = normalizeAndValidateResult(rawResult, stageInfo, modelTelemetry)
+                    if (normalized.optString("status") == "error") {
+                        return MessageProtocol.createTaskErrorMessage(
+                            taskId = taskId,
+                            jobId = jobId,
+                            error = normalized.optString("error", "Malformed task result")
+                        )
+                    }
+
+                    val safeResult: Any = normalized.optString("result", "{}")
+
+                    if (jobId != null && stageInfo.stageName == "tflite_partition" && stageInfo.partitionIdx != null) {
+                        completedPartitionIdxByJob[jobId] = maxOf(
+                            completedPartitionIdxByJob[jobId] ?: -1,
+                            stageInfo.partitionIdx
+                        )
                     }
                     MessageProtocol.createTaskResultMessage(
                         taskId = taskId,
@@ -431,6 +704,537 @@ class TaskProcessor(private val context: Context) {
                 error = "Task execution failed: ${e.message ?: "Unknown error"}"
             )
         }
+    }
+
+    private suspend fun executeCodeWithRetry(
+        funcCode: String,
+        taskArgs: String,
+        stageInfo: StageInfo
+    ): Map<String, Any?> {
+        var attempt = 0
+        var last: Map<String, Any?> = emptyMap()
+
+        while (attempt <= MAX_TRANSIENT_RETRIES) {
+            val result = pythonExecutor.executeCode(funcCode, taskArgs)
+            last = result
+
+            val status = result["status"] as? String ?: "error"
+            if (status != "error") return result
+
+            val message = result["message"] as? String ?: ""
+            val transient = isTransientFailure(message)
+            if (!transient || attempt == MAX_TRANSIENT_RETRIES) {
+                return result
+            }
+
+            attempt += 1
+            Log.w(TAG, "Retrying stage ${stageInfo.stageName} partition=${stageInfo.partitionIdx}; attempt=$attempt reason=$message")
+            delay(300)
+        }
+
+        return last
+    }
+
+    private fun isTransientFailure(message: String): Boolean {
+        val msg = message.lowercase()
+        return msg.contains("no_tflite_backend") ||
+            msg.contains("decode") ||
+            msg.contains("base64") ||
+            msg.contains("temporarily unavailable")
+    }
+
+    private fun inspectStage(funcCode: String, taskArgs: String): StageInfo {
+        val code = funcCode.lowercase()
+        return when {
+            code.contains("def partition_model(") -> StageInfo("partition_model", null)
+            code.contains("def run_tflite_partition(") -> StageInfo("tflite_partition", extractPartitionIdx(taskArgs))
+            code.contains("def classify(") -> StageInfo("classify", null)
+            else -> StageInfo("generic", null)
+        }
+    }
+
+    private fun routePolicyForStage(stageInfo: StageInfo): String {
+        return when (stageInfo.stageName) {
+            "partition_model" -> "desktop_tensorflow_pool"
+            "tflite_partition" -> "android_tflite_pool"
+            "classify" -> "android_or_desktop"
+            else -> "default_worker_pool"
+        }
+    }
+
+    private fun isStageOrderSatisfied(jobId: String?, stageInfo: StageInfo): Boolean {
+        if (jobId.isNullOrBlank()) return true
+        if (stageInfo.stageName != "tflite_partition") return true
+
+        val idx = stageInfo.partitionIdx ?: return true
+        if (idx == 0) {
+            completedPartitionIdxByJob[jobId] = -1
+            return true
+        }
+
+        val lastCompleted = completedPartitionIdxByJob[jobId] ?: -1
+        return lastCompleted >= idx - 1
+    }
+
+    private fun extractPartitionIdx(taskArgs: String): Int? {
+        if (taskArgs.isBlank()) return null
+        return try {
+            val trimmed = taskArgs.trim()
+            val obj = when {
+                trimmed.startsWith("[") -> {
+                    val arr = JSONArray(trimmed)
+                    if (arr.length() > 0 && arr.optJSONObject(0) != null) arr.getJSONObject(0) else null
+                }
+                trimmed.startsWith("{") -> JSONObject(trimmed)
+                else -> null
+            } ?: return null
+
+            val originalArgs = obj.optJSONObject("original_args")
+            when {
+                originalArgs != null && originalArgs.has("partition_idx") -> originalArgs.optInt("partition_idx")
+                obj.has("partition_idx") -> obj.optInt("partition_idx")
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun normalizeTaskArgsForStage(taskArgs: String, stageInfo: StageInfo): String {
+        return when (stageInfo.stageName) {
+            "tflite_partition" -> normalizeTflitePartitionArgs(taskArgs, stageInfo.partitionIdx)
+            "classify" -> normalizeClassifyArgs(taskArgs)
+            else -> taskArgs
+        }
+    }
+
+    private fun normalizeTflitePartitionArgs(taskArgs: String, partitionIdx: Int?): String {
+        val idx = partitionIdx ?: return taskArgs
+
+        return try {
+            val rootArray = if (taskArgs.trim().startsWith("[")) {
+                JSONArray(taskArgs)
+            } else {
+                JSONArray().apply {
+                    if (taskArgs.trim().startsWith("{")) put(JSONObject(taskArgs))
+                }
+            }
+
+            val first = if (rootArray.length() > 0 && rootArray.optJSONObject(0) != null) {
+                rootArray.getJSONObject(0)
+            } else {
+                JSONObject().also { rootArray.put(it) }
+            }
+
+            val originalArgs = first.optJSONObject("original_args") ?: JSONObject().also {
+                first.put("original_args", it)
+            }
+            if (!originalArgs.has("partition_idx")) {
+                originalArgs.put("partition_idx", idx)
+            }
+            // Keep Android payload metadata-only; model bytes are resolved locally.
+            first.remove("tflite_models")
+            first.remove("tflite_b64")
+            first.remove("tflite_b64_str")
+            originalArgs.remove("tflite_models")
+            originalArgs.remove("tflite_b64")
+            originalArgs.remove("tflite_b64_str")
+            if (!first.has("upstream_results")) {
+                first.put("upstream_results", JSONObject())
+            }
+            rootArray.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to normalize task_args for tflite_partition: ${e.message}")
+            taskArgs
+        }
+    }
+
+    private fun normalizeClassifyArgs(taskArgs: String): String {
+        return try {
+            val rootArray = if (taskArgs.trim().startsWith("[")) {
+                JSONArray(taskArgs)
+            } else {
+                JSONArray().apply {
+                    if (taskArgs.trim().startsWith("{")) put(JSONObject(taskArgs))
+                }
+            }
+
+            if (rootArray.length() == 0 || rootArray.optJSONObject(0) == null) {
+                return taskArgs
+            }
+
+            val first = rootArray.getJSONObject(0)
+            val originalArgs = first.optJSONObject("original_args") ?: JSONObject().also {
+                first.put("original_args", it)
+            }
+            val upstreamResults = first.optJSONObject("upstream_results") ?: return rootArray.toString()
+
+            if (upstreamResults.length() == 1) {
+                val upstreamKey = upstreamResults.keys().asSequence().firstOrNull()
+                val upstreamObj = upstreamKey?.let { upstreamResults.optJSONObject(it) }
+
+                if (upstreamObj != null) {
+                    val upstreamStreamId = if (upstreamObj.has("stream_id")) upstreamObj.optInt("stream_id") else null
+                    if (upstreamStreamId != null) {
+                        val currentStreamId = if (originalArgs.has("stream_id")) originalArgs.optInt("stream_id") else null
+                        if (currentStreamId == null || currentStreamId != upstreamStreamId) {
+                            originalArgs.put("stream_id", upstreamStreamId)
+                            Log.i(TAG, "Normalized classify stream_id to upstream stream_id=$upstreamStreamId")
+                        }
+                    }
+
+                    // Some classify payloads look for feature_map directly.
+                    // Provide alias from upstream output_tensor when available.
+                    if (!first.has("feature_map") && upstreamObj.optJSONObject("output_tensor") != null) {
+                        first.put("feature_map", upstreamObj.optJSONObject("output_tensor"))
+                    }
+                }
+            }
+
+            rootArray.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to normalize task_args for classify: ${e.message}")
+            taskArgs
+        }
+    }
+
+    private suspend fun prepareTflitePartitionArgs(
+        taskArgs: String,
+        taskData: JSONObject?,
+        partitionIdx: Int?
+    ): TflitePreparationResult {
+        val idx = partitionIdx ?: return TflitePreparationResult(taskArgs = taskArgs, telemetry = null)
+        val started = SystemClock.elapsedRealtime()
+
+        val rootArray = if (taskArgs.trim().startsWith("[")) {
+            JSONArray(taskArgs)
+        } else {
+            JSONArray().apply {
+                if (taskArgs.trim().startsWith("{")) put(JSONObject(taskArgs))
+            }
+        }
+
+        val first = if (rootArray.length() > 0 && rootArray.optJSONObject(0) != null) {
+            rootArray.getJSONObject(0)
+        } else {
+            JSONObject().also { rootArray.put(it) }
+        }
+        val originalArgs = first.optJSONObject("original_args") ?: JSONObject().also {
+            first.put("original_args", it)
+        }
+        val upstreamModelMeta = readUpstreamModelMeta(first, originalArgs)
+
+        val modelId = readStringField(first, originalArgs, taskData, "model_id", upstreamModelMeta)
+            ?: readStringField(first, originalArgs, taskData, "model", upstreamModelMeta)
+            ?: readStringField(first, originalArgs, taskData, "model_name", upstreamModelMeta)
+        val modelManifest = readManifest(first, originalArgs, taskData, upstreamModelMeta)
+        val modelStoreDir = readStringField(first, originalArgs, taskData, "model_store_dir", upstreamModelMeta)
+        val explicitModelBaseUrl = readStringField(first, originalArgs, taskData, "model_base_url", upstreamModelMeta)
+        val modelBaseUrl = explicitModelBaseUrl ?: deriveDefaultModelBaseUrl()
+        val workerCacheDir = readStringField(first, originalArgs, taskData, "worker_model_cache_dir", upstreamModelMeta)
+
+        if (modelId.isNullOrBlank()) {
+            throw IllegalStateException("Missing model_id for tflite_partition task")
+        }
+
+        if (!first.has("model_id")) first.put("model_id", modelId)
+        if (!originalArgs.has("model_id")) originalArgs.put("model_id", modelId)
+        if (modelManifest != null && !originalArgs.has("model_manifest")) originalArgs.put("model_manifest", modelManifest)
+        if (!modelStoreDir.isNullOrBlank() && !originalArgs.has("model_store_dir")) originalArgs.put("model_store_dir", modelStoreDir)
+        if (!modelBaseUrl.isNullOrBlank() && !originalArgs.has("model_base_url")) originalArgs.put("model_base_url", modelBaseUrl)
+        if (!workerCacheDir.isNullOrBlank() && !originalArgs.has("worker_model_cache_dir")) originalArgs.put("worker_model_cache_dir", workerCacheDir)
+
+        if (explicitModelBaseUrl.isNullOrBlank() && !modelBaseUrl.isNullOrBlank()) {
+            Log.i(TAG, "model_base_url missing in task payload; using default $modelBaseUrl")
+        }
+
+        val resolved = try {
+            modelRepository.resolvePartition(
+                ModelRepository.ResolveRequest(
+                    modelId = modelId,
+                    partitionIdx = idx,
+                    modelManifest = modelManifest,
+                    modelStoreDir = modelStoreDir,
+                    modelBaseUrl = modelBaseUrl,
+                    workerModelCacheDir = workerCacheDir
+                )
+            )
+        } catch (e: Exception) {
+            val elapsed = SystemClock.elapsedRealtime() - started
+            throw IllegalStateException("Model resolution failed (model_id=$modelId, partition_idx=$idx, model_load_ms=$elapsed): ${e.message}")
+        }
+
+        Log.i(TAG, "Model resolved: ${resolved.file.absolutePath}, source=${resolved.source}, cacheHit=${resolved.cacheHit}, downloadMs=${resolved.downloadMs}")
+
+        // Provide local model path aliases for updated Python runtime loaders.
+        val localPath = resolved.file.absolutePath
+        first.put("local_model_path", localPath)
+        first.put("model_local_path", localPath)
+        originalArgs.put("local_model_path", localPath)
+        originalArgs.put("model_local_path", localPath)
+
+        val telemetry = JSONObject()
+            .put("model_source", resolved.source.name.lowercase())
+            .put("cache_hit", resolved.cacheHit)
+            .put("model_load_ms", resolved.modelLoadMs)
+        if (resolved.downloadMs != null) {
+            telemetry.put("download_ms", resolved.downloadMs)
+        }
+
+        return TflitePreparationResult(taskArgs = rootArray.toString(), telemetry = telemetry)
+    }
+
+    private fun readManifest(
+        first: JSONObject,
+        originalArgs: JSONObject,
+        taskData: JSONObject?,
+        upstreamModelMeta: JSONObject?
+    ): JSONObject? {
+        val candidates = listOf(
+            first.opt("model_manifest"),
+            originalArgs.opt("model_manifest"),
+            taskData?.opt("model_manifest"),
+            upstreamModelMeta?.opt("model_manifest"),
+            upstreamModelMeta?.opt("manifest")
+        )
+        for (candidate in candidates) {
+            when (candidate) {
+                is JSONObject -> return candidate
+                is String -> {
+                    val trimmed = candidate.trim()
+                    if (trimmed.startsWith("{")) {
+                        try {
+                            return JSONObject(trimmed)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun readStringField(
+        first: JSONObject,
+        originalArgs: JSONObject,
+        taskData: JSONObject?,
+        key: String,
+        upstreamModelMeta: JSONObject? = null
+    ): String? {
+        val v1 = first.optString(key, "").trim()
+        if (v1.isNotBlank()) return v1
+        val v2 = originalArgs.optString(key, "").trim()
+        if (v2.isNotBlank()) return v2
+        val v3 = taskData?.optString(key, "")?.trim().orEmpty()
+        if (v3.isNotBlank()) return v3
+        val v4 = upstreamModelMeta?.optString(key, "")?.trim().orEmpty()
+        return v4.ifBlank { null }
+    }
+
+    private fun readUpstreamModelMeta(first: JSONObject, originalArgs: JSONObject): JSONObject? {
+        val upstreamResults = first.optJSONObject("upstream_results") ?: return null
+        if (upstreamResults.length() == 0) return null
+
+        val streamId = if (originalArgs.has("stream_id")) originalArgs.optInt("stream_id", -1) else -1
+        var firstObj: JSONObject? = null
+        val keys = upstreamResults.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val obj = upstreamResults.optJSONObject(key) ?: continue
+            if (firstObj == null) firstObj = obj
+            if (streamId >= 0 && obj.optInt("stream_id", Int.MIN_VALUE) == streamId) {
+                return obj
+            }
+        }
+        return firstObj
+    }
+
+    fun handleLowStorageEvent() {
+        processorScope.launch {
+            try {
+                modelRepository.cleanupForLowStorage()
+            } catch (e: Exception) {
+                Log.w(TAG, "Model cache low-storage cleanup failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun normalizeAndValidateResult(rawResult: Any?, stageInfo: StageInfo, modelTelemetry: JSONObject?): JSONObject {
+        return try {
+            val resultObj = when (rawResult) {
+                null -> JSONObject()
+                is JSONObject -> rawResult
+                is String -> {
+                    val t = rawResult.trim()
+                    if (t.startsWith("{")) JSONObject(t) else JSONObject().put("result", rawResult)
+                }
+                else -> JSONObject().put("result", rawResult.toString())
+            }
+
+            if (resultObj.has("error")) {
+                val baseError = resultObj.optString("error", "Task returned error")
+                val diagnostics = mutableListOf<String>()
+
+                val backendUsed = resultObj.optString("backend_used", "")
+                if (backendUsed.isNotBlank()) diagnostics.add("backend_used=$backendUsed")
+
+                if (resultObj.has("stream_id")) diagnostics.add("stream_id=${resultObj.opt("stream_id")}")
+                if (resultObj.has("partition_idx")) diagnostics.add("partition_idx=${resultObj.opt("partition_idx")}")
+                val modelId = resultObj.optString("model_id", "")
+                if (modelId.isNotBlank()) diagnostics.add("model_id=$modelId")
+
+                val traceArray = resultObj.optJSONArray("trace")
+                if (traceArray != null) {
+                    diagnostics.add("trace_len=${traceArray.length()}")
+                    if (traceArray.length() > 0) {
+                        val traceHead = (0 until minOf(3, traceArray.length()))
+                            .mapNotNull { idx -> traceArray.optString(idx, null) }
+                            .joinToString(" | ")
+                        if (traceHead.isNotBlank()) diagnostics.add("trace_head=$traceHead")
+                    }
+                }
+
+                if (modelTelemetry != null) {
+                    diagnostics.add("model_source=${modelTelemetry.optString("model_source", "unknown")}")
+                    diagnostics.add("cache_hit=${modelTelemetry.optBoolean("cache_hit", false)}")
+                    diagnostics.add("model_load_ms=${modelTelemetry.optLong("model_load_ms", 0L)}")
+                }
+
+                val enriched = if (diagnostics.isNotEmpty()) {
+                    "$baseError [${diagnostics.joinToString(", ")}]"
+                } else {
+                    baseError
+                }
+
+                return JSONObject().put("status", "error").put("error", enriched)
+            }
+
+            if (stageInfo.stageName == "tflite_partition") {
+                // Never return model blobs from Android workers.
+                if (resultObj.has("tflite_models")) {
+                    resultObj.remove("tflite_models")
+                }
+                resultObj.remove("tflite_b64")
+                resultObj.remove("tflite_b64_str")
+
+                if (!resultObj.has("partition_idx")) {
+                    stageInfo.partitionIdx?.let { resultObj.put("partition_idx", it) }
+                }
+                if (!resultObj.has("partition_idx") || !resultObj.has("output_tensor")) {
+                    return JSONObject().put("status", "error").put("error", "Malformed tflite_partition result: requires partition_idx and output_tensor")
+                }
+
+                if (modelTelemetry != null) {
+                    resultObj.put("model_source", modelTelemetry.optString("model_source", "unknown"))
+                    resultObj.put("cache_hit", modelTelemetry.optBoolean("cache_hit", false))
+                    resultObj.put("model_load_ms", modelTelemetry.optLong("model_load_ms", 0L))
+                    if (modelTelemetry.has("download_ms")) {
+                        resultObj.put("download_ms", modelTelemetry.optLong("download_ms", 0L))
+                    }
+                    if (modelTelemetry.has("model_load_error")) {
+                        resultObj.put("model_load_error", modelTelemetry.optString("model_load_error", ""))
+                    }
+                }
+
+                val tensorObj = resultObj.optJSONObject("output_tensor")
+                val dataB64 = tensorObj?.optString("data_b64", "") ?: ""
+                if (dataB64.isNotEmpty() && dataB64.length > MAX_OUTPUT_TENSOR_B64_CHARS) {
+                    val uploadResult = uploadLargeTensorAndGetUrl(dataB64, stageInfo.partitionIdx)
+                    val uploadedUrl = uploadResult.fileUrl
+                        ?: return JSONObject().put("status", "error")
+                            .put(
+                                "error",
+                                "Tensor payload too large (${dataB64.length} chars) and upload to local HTTP server failed: " +
+                                    (uploadResult.error ?: "unknown upload error")
+                            )
+
+                    tensorObj?.apply {
+                        remove("data")
+                        remove("data_b64")
+                        put("file_url", uploadedUrl)
+                        put("transport", "http_url")
+                    }
+                    resultObj.put("tensor_offloaded", true)
+                }
+            }
+
+            JSONObject().put("status", "ok").put("result", resultObj.toString())
+        } catch (e: Exception) {
+            JSONObject().put("status", "error").put("error", "Failed to normalize result: ${e.message}")
+        }
+    }
+
+    private fun uploadLargeTensorAndGetUrl(dataB64: String, partitionIdx: Int?): TensorUploadResult {
+        val foremanIp = configManager.getForemanIP().trim()
+        if (foremanIp.isEmpty()) {
+            Log.w(TAG, "Cannot offload tensor: Foreman IP is not configured")
+            return TensorUploadResult(fileUrl = null, error = "Foreman IP is not configured")
+        }
+
+        val uploadUrl = "http://$foremanIp:$DEFAULT_TENSOR_UPLOAD_PORT$TENSOR_UPLOAD_PATH"
+        val suffix = partitionIdx?.toString() ?: "unknown"
+        val tempFile = File(context.cacheDir, "tensor_${System.currentTimeMillis()}_${suffix}.npy")
+
+        return try {
+            val bytes = Base64.decode(dataB64, Base64.DEFAULT)
+            tempFile.writeBytes(bytes)
+
+            val filePart = tempFile.asRequestBody("application/octet-stream".toMediaTypeOrNull())
+            val multipartBody = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", tempFile.name, filePart)
+                .build()
+
+            val request = Request.Builder()
+                .url(uploadUrl)
+                .post(multipartBody)
+                .build()
+
+            tensorUploadClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Tensor upload failed: HTTP ${response.code} (${response.message})")
+                    return TensorUploadResult(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> HTTP ${response.code} (${response.message})"
+                    )
+                }
+
+                val body = response.body?.string().orEmpty()
+                if (body.isBlank()) {
+                    Log.w(TAG, "Tensor upload failed: empty response body")
+                    return TensorUploadResult(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> empty response body"
+                    )
+                }
+
+                val json = JSONObject(body)
+                val fileUrl = json.optString("file_url", "").trim()
+                if (fileUrl.isBlank()) {
+                    Log.w(TAG, "Tensor upload response missing file_url: $body")
+                    TensorUploadResult(
+                        fileUrl = null,
+                        error = "POST $uploadUrl -> response missing file_url (body=${body.take(300)})"
+                    )
+                } else {
+                    TensorUploadResult(fileUrl = fileUrl, error = null)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Tensor upload exception: ${e.message}")
+            TensorUploadResult(
+                fileUrl = null,
+                error = "POST $uploadUrl -> ${e.javaClass.simpleName}: ${e.message ?: "unknown exception"}"
+            )
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private fun deriveDefaultModelBaseUrl(): String? {
+        val foremanIp = configManager.getForemanIP().trim()
+        if (foremanIp.isBlank()) return null
+        return "http://$foremanIp:$DEFAULT_MODEL_ARTIFACT_HTTP_PORT$DEFAULT_MODEL_STORE_HTTP_PREFIX"
     }
     
     /**
@@ -1117,13 +1921,30 @@ class TaskProcessor(private val context: Context) {
     /**
      * Get current task status
      */
-    fun getCurrentTaskStatus(): Map<String, Any> {
-        return try {
-            // Capture all atomic values at once to avoid race conditions
-            val isBusy = isTaskRunning.get()
-            val taskId = currentTaskId.get() ?: ""
-            val jobId = currentJobId.get() ?: ""
-            val startTime = taskStartTime.get()
+    override fun getCurrentTaskStatus(): Map<String, Any> {
+        // Capture all atomic values at once to avoid race conditions
+        val isBusy = isTaskRunning.get()
+        val taskId = currentTaskId.get() ?: ""
+        val jobId = currentJobId.get() ?: ""
+        val startTime = taskStartTime.get()
+        
+        // Get progress from multiple sources (priority order)
+        var progressPercent = currentProgress.get()  // 1. Real-time progress from Python callback
+        
+        // 2. Fallback to checkpoint progress if no real-time updates
+        if (progressPercent <= 0f) {
+            val currentCheckpointState = checkpointHandler.currentState.value
+            progressPercent = currentCheckpointState?.progressPercent ?: 0f
+        }
+        
+        // 3. Fallback to time-based progress if no other source
+        //    Skip when paused – the task isn't making progress, so the bar should freeze.
+        if (progressPercent <= 0f && isBusy && !isTaskPaused.get() && startTime != null) {
+            val elapsedMs = System.currentTimeMillis() - startTime - totalPausedMs.get()
+            // Simulate progress: 0-99% spread evenly across the full task timeout window.
+            progressPercent = ((elapsedMs / TASK_TIMEOUT_MS.toFloat()) * 99f).coerceIn(0f, 99f)
+            Log.d(TAG, "Using time-based fallback progress: $progressPercent% (elapsed: ${elapsedMs}ms)")
+        }
 
             // Get progress from multiple sources (priority order)
             var progressPercent = currentProgress.get()  // 1. Real-time progress from Python callback
@@ -1327,7 +2148,7 @@ class TaskProcessor(private val context: Context) {
     /**
      * Cleanup resources
      */
-    fun cleanup() {
+    override fun cleanup() {
         try {
             Log.d(TAG, "Cleaning up TaskProcessor...")
             checkpointHandler.stopCheckpointMonitoring()

@@ -2,8 +2,10 @@ package com.example.mcc_phase3.data.websocket
 
 import android.util.Log
 import org.java_websocket.client.WebSocketClient
+import org.java_websocket.drafts.Draft_6455
 import org.java_websocket.handshake.ServerHandshake
 import java.net.URI
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.*
 
@@ -22,6 +24,7 @@ class WebSocketManager private constructor() {
 
     companion object {
         private const val TAG = "WebSocketManager"
+        private const val MAX_INBOUND_FRAME_BYTES = 8 * 1024 * 1024 // 8 MB hard cap
 
         @Volatile
         private var instance: WebSocketManager? = null
@@ -49,7 +52,12 @@ class WebSocketManager private constructor() {
 
         try {
             val uri = URI(url)
-            webSocket = object : WebSocketClient(uri) {
+            val draft = Draft_6455(
+                Collections.emptyList(),
+                MAX_INBOUND_FRAME_BYTES
+            )
+
+            webSocket = object : WebSocketClient(uri, draft) {
                 init {
                     // Set connection timeout to 30 seconds
                     setConnectionLostTimeout(30)
@@ -85,6 +93,13 @@ class WebSocketManager private constructor() {
 
                 override fun onError(ex: Exception?) {
                     Log.e(TAG, "WebSocket error", ex)
+                    if (ex?.message?.contains("max frame", ignoreCase = true) == true ||
+                        ex?.message?.contains("frame size", ignoreCase = true) == true ||
+                        ex?.message?.contains("Failed to allocate", ignoreCase = true) == true
+                    ) {
+                        Log.e(TAG, "Inbound WebSocket frame exceeded safe limit ($MAX_INBOUND_FRAME_BYTES bytes)")
+                        webSocket?.close()
+                    }
                     listeners.forEach { it.onError(ex) }
                 }
             }

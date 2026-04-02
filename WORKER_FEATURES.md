@@ -1,165 +1,135 @@
-# CROWDio Mobile Worker - Feature Implementation
+# CROWDio Mobile Worker - Implementation Status (Source-Verified)
 
-## ✅ All Python Foreman Features Implemented
+This file summarizes what is currently implemented in the Android worker runtime based on source code inspection.
 
-### 1. Connection Management
-**Python**: `ConnectionManager` class  
-**Android**: `WorkerWebSocketClient.kt`
-- ✅ WebSocket connection to foreman
-- ✅ Auto-reconnection with exponential backoff
-- ✅ Connection state tracking (`isConnected`, `isRunning`)
-- ✅ Max reconnection attempts (10)
+## 1. Connection Management
 
-### 2. Heartbeat System  
-**Python**: `ping_workers()` method (30 seconds)  
-**Android**: `startHeartbeat()` in WorkerWebSocketClient
-```kotlin
-private const val HEARTBEAT_INTERVAL = 30000L // 30 seconds
-```
-- ✅ Sends heartbeat every 30 seconds
-- ✅ Includes worker ID, current task, device specs
-- ✅ Auto-starts on connection
-- ✅ Auto-stops on disconnection
+Primary class: `WorkerWebSocketClient.kt`
 
-### 3. Message Handling
-**Python**: `ClientMessageHandler`, `WorkerMessageHandler`  
-**Android**: `MessageProtocol.kt`, `WorkerWebSocketClient.kt`
+- Implemented: WebSocket connect/disconnect lifecycle.
+- Implemented: connection state tracking (`isConnected`, `isConnecting`, `isRunning`).
+- Implemented: reconnection orchestration via `ReconnectionManager` (exponential backoff + jitter).
+- Implemented: reconnect flow while worker is running.
 
-#### Supported Message Types:
-- ✅ `WORKER_READY` - Worker registration with device specs
-- ✅ `ASSIGN_TASK` - Receive task assignments
-- ✅ `TASK_RESULT` - Send task results
-- ✅ `TASK_ERROR` - Send task errors
-- ✅ `PING/PONG` - Connection keepalive
-- ✅ `WORKER_HEARTBEAT` - Status updates
-- ✅ `RESUME_TASK` - Resume from checkpoint
-- ✅ `CHECKPOINT_ACK` - Checkpoint acknowledgments
+Notes:
 
-### 4. Task Processing
-**Python**: `TaskDispatcher` class  
-**Android**: `TaskProcessor.kt`
-- ✅ Task assignment handling
-- ✅ Task execution with Python via Chaquopy
-- ✅ Result generation and sending
-- ✅ Error handling and reporting
-- ✅ Checkpoint support (base + delta)
+- Dashboard WebSocket (`WebSocketManager`) has `maxReconnectAttempts = 10`.
+- Worker socket reconnection (`ReconnectionManager`) is start/stop driven and delay-bounded, not fixed-at-10 by default.
 
-### 5. Checkpoint System
-**Python**: Checkpoint recording in `_record_worker_disconnection_failures`  
-**Android**: `CheckpointHandler.kt`
-- ✅ Base checkpoint creation
-- ✅ Delta checkpoint creation
-- ✅ Checkpoint compression (gzip)
-- ✅ Checkpoint sending via WebSocket
-- ✅ Checkpoint acknowledgment handling
-- ✅ Task resumption from checkpoints
+## 2. Heartbeat
 
-### 6. Worker Registration
-**Python**: `WORKER_READY` message with device specs  
-**Android**: `createWorkerReadyMessage()` in MessageProtocol
-```kotlin
-// CRITICAL: Android-specific worker type
-put("worker_type", "android_chaquopy")
-put("capabilities", JSONObject().apply {
-    put("supports_checkpointing", true)
-    put("checkpoint_format", "json")
-    put("supports_resume", true)
-    put("supports_delta_checkpoints", true)
-    put("compression_supported", "gzip")
-})
-```
+Primary class: `WorkerWebSocketClient.kt`
 
-### 7. Connection Cleanup
-**Python**: `_cleanup_connection()` method  
-**Android**: `disconnect()` in WorkerWebSocketClient
-- ✅ Stop heartbeat on disconnect
-- ✅ Cancel reconnection attempts
-- ✅ Close WebSocket connection
-- ✅ Clear connection state
-- ✅ Notify listeners
+- Implemented: periodic worker heartbeat (`HEARTBEAT_INTERVAL = 30_000ms`).
+- Implemented: auto-start on socket open, auto-stop on disconnect.
+- Implemented: immediate heartbeat helper.
 
-### 8. Service Architecture
-**Python**: Background thread with `run_worker_background()`  
-**Android**: `MobileWorkerService.kt`
-- ✅ Foreground service (prevents killing)
-- ✅ Service lifecycle management
-- ✅ START_STICKY (auto-restart on kill)
-- ✅ Notification updates
-- ✅ Task removed handling
+Heartbeat payload includes:
 
-### 9. Device Information
-**Python**: Device specs in worker registration  
-**Android**: `DeviceInfoCollector.kt`
-- ✅ OS type and version
-- ✅ CPU model, cores, threads, frequency
-- ✅ RAM total and available
-- ✅ GPU model
-- ✅ Battery level and charging status
-- ✅ Network type
-- ✅ Python version (Chaquopy)
+- `worker_id`
+- `status` (`online`/`busy`)
+- `current_task`
+- `progress_percent`
 
-### 10. Status Reporting
-**Python**: `get_stats()` method  
-**Android**: `getWorkerStatus()` in MobileWorkerService
-```kotlin
-mapOf(
-    "is_running" to isRunning.get(),
-    "connection" to connectionStatus,
-    "task_processor" to taskStatus,
-    "python_executor" to pythonInfo,
-    "worker_id" to workerId
-)
-```
+## 3. Message Handling
 
-## Architecture Comparison
+Protocol classes: `Protocol.kt`, `MessageProtocol.kt`
+Runtime router: `WorkerWebSocketClient.kt`
 
-### Python FastAPI Worker
-```
-FastAPIWorker
- ├── WebSocket connection
- ├── Background worker thread
- ├── FastAPI server (REST API)
- └── Uvicorn server
-```
+Inbound handled in worker runtime:
 
-### Android Mobile Worker
-```
-MobileWorkerService (Foreground Service)
- ├── WorkerWebSocketClient (Connection & Heartbeat)
- ├── TaskProcessor (Task routing)
- ├── PythonExecutor (Chaquopy execution)
- └── CheckpointHandler (Checkpoint system)
-```
+- `assign_task`
+- `resume_task`
+- `ping`
+- `checkpoint_ack`
 
-## Key Differences (Android Advantages)
+Outbound sent by worker runtime:
 
-1. **Foreground Service**: Prevents OS from killing worker
-2. **Native Android**: Better battery management
-3. **Notification Updates**: Real-time status in notification
-4. **Mobile-Optimized**: Handles network changes gracefully
-5. **Chaquopy Integration**: Native Python execution on Android
+- `worker_ready`
+- `task_result`
+- `task_error`
+- `worker_heartbeat`
+- `task_checkpoint`
+- `pong`
 
-## Configuration
+## 4. Task Processing
 
-Both Python and Android workers use similar configuration:
+Primary class: `TaskProcessor.kt` (implements `TaskExecutor`)
 
-```kotlin
-// Android
-val workerId = UUID.randomUUID().toString()
-val foremanUrl = "ws://localhost:9000"
-val heartbeatInterval = 30000L // 30 seconds
+- Implemented: task parsing and validation.
+- Implemented: queueing when worker is busy (channel-based queued execution).
+- Implemented: timeout guard (`TASK_TIMEOUT_MS = 10 minutes`).
+- Implemented: result/error translation back to protocol messages.
+- Implemented: model-partition preparation and download/cache integration through `ModelRepository`.
+- Implemented: pause/resume/kill control integration with service/UI.
 
-// Python equivalent in your script
-worker_id = f"worker-{uuid.uuid4().hex[:8]}"
-foreman_url = "ws://localhost:9000"
-heartbeat_interval = 30  # seconds
-```
+## 5. Checkpoint System
 
-## Summary
+Primary classes: `CheckpointHandler.kt`, `TaskProcessor.kt`, `PythonExecutor.kt`
 
-✅ **100% Feature Parity** - All critical Python foreman features are implemented  
-✅ **Enhanced for Mobile** - Additional Android-specific optimizations  
-✅ **Production Ready** - Robust error handling and reconnection logic  
-✅ **Well Tested** - Comprehensive logging and status reporting
+- Implemented: periodic checkpoint loop.
+- Implemented: BASE checkpoint then DELTA checkpoints.
+- Implemented: JSON serialization + GZIP compression + hex transport (`delta_data_hex`).
+- Implemented: checkpoint callback from Python state updates.
+- Implemented: checkpoint acknowledgment handling (log-level processing).
+- Implemented: resume path with checkpoint state restoration and continuation.
 
-The Android mobile worker is a **full-featured implementation** that matches and exceeds the Python FastAPI worker capabilities!
+## 6. Worker Registration
+
+Runtime registration currently sent by `WorkerWebSocketClient.sendWorkerReady()`:
+
+- `worker_type = "android_kotlin"`
+- `platform = "android"`
+- `runtime = "jvm"`
+- `capabilities.supports_settrace = false`
+- `capabilities.supports_frame_introspection = false`
+- `device_specs` from `DeviceInfoCollector`
+
+Note:
+
+- `MessageProtocol.createWorkerReadyMessage()` contains an `android_chaquopy` variant, but runtime registration in worker flow is currently produced directly by `WorkerWebSocketClient`.
+
+## 7. Service Architecture
+
+Primary class: `MobileWorkerService.kt`
+
+- Implemented: foreground service startup and notification channel.
+- Implemented: `START_STICKY` restart behavior.
+- Implemented: worker start/stop actions (`START_WORKER`, `STOP_WORKER`).
+- Implemented: status endpoint via binder (`getWorkerStatus`).
+- Implemented: task control methods exposed to UI (`pauseCurrentTask`, `resumeCurrentTask`, `killCurrentTask`).
+- Implemented: low-memory hooks triggering execution/model cleanup paths.
+
+## 8. Python Execution Layer
+
+Primary class: `PythonExecutor.kt`
+
+- Implemented: Chaquopy initialization (`Python.start(AndroidPlatform(...))`).
+- Implemented: plain/base64 function code and args handling.
+- Implemented: Python builtins callbacks for checkpoint and progress reporting.
+- Implemented: resumed execution path with restored checkpoint state.
+- Implemented: fallback replacement for heavy sentiment code patterns.
+
+Bundled Python modules:
+
+- `app/src/main/python/sentiment_worker.py`
+- `app/src/main/python/dnn_inference.py`
+
+## 9. Device and Status Reporting
+
+- `DeviceInfoCollector`: used in worker ready and ping/pong/metrics contexts.
+- `MobileWorkerService.getWorkerStatus()`: returns service state + connection + task processor + python environment summary.
+
+## 10. Practical Parity Statement
+
+Current Android worker implementation provides production-grade equivalents for:
+
+- WebSocket worker lifecycle.
+- Task assignment execution with Python on-device runtime.
+- Checkpoint + resume flow.
+- Heartbeat and worker status telemetry.
+
+Recommended wording for parity claims:
+
+- Use "feature parity for core worker lifecycle and checkpoint-resume flow".
+- Avoid hard claims like "100% parity" unless protocol contracts are continuously validated against foreman integration tests.

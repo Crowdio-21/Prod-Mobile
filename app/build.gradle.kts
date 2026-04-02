@@ -64,6 +64,8 @@ android {
                 install("requests")
                 install("aiohttp")
                 install("Pillow")
+                install("tflite-runtime")
+
             }
         }
     }
@@ -97,6 +99,8 @@ dependencies {
 
     // ONNX Runtime for native ONNX partition inference
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+    // Ktor for D2D tensor transfer (TCP sockets)
+    implementation("io.ktor:ktor-network:2.3.7")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

@@ -18,6 +18,7 @@ class ConfigManager private constructor(context: Context) {
         private const val KEY_FOREMAN_PORT = "foreman_port"
         private const val KEY_WEBSOCKET_PORT = "websocket_port"
         private const val KEY_STATISTICS_PORT = "statistics_port"
+        private const val KEY_MODEL_STORE_BASE_URL = "model_store_base_url"
         private const val KEY_WORKING_DIR = "working_dir"
         
         // Default values - MUST be configured by user in Settings
@@ -126,7 +127,23 @@ class ConfigManager private constructor(context: Context) {
         prefs.edit().putInt(KEY_STATISTICS_PORT, port).apply()
     }
 
-    
+    /**
+     * Get the model store base URL (for downloading TFLite partitions).
+     * If set, this is used instead of Foreman IP for model downloads (e.g. when model store
+     * runs on a different host). Example: http://192.168.1.12:8001/.model_store
+     */
+    fun getModelStoreBaseUrl(): String {
+        return prefs.getString(KEY_MODEL_STORE_BASE_URL, "")?.trim() ?: ""
+    }
+
+    /**
+     * Set the model store base URL. Use empty string to fall back to Foreman IP.
+     */
+    fun setModelStoreBaseUrl(url: String) {
+        Log.d(TAG, "Setting model store base URL to: ${if (url.isBlank()) "(use Foreman IP)" else url}")
+        prefs.edit().putString(KEY_MODEL_STORE_BASE_URL, url.trim()).apply()
+    }
+
     /**
      * Get the complete Stat service URL
      * @return Stat service URL or null if Foreman IP is not configured
@@ -215,6 +232,8 @@ class ConfigManager private constructor(context: Context) {
             - Stat Service IP: ${getForemanIP()}
             - Stat Service Port: ${getStatServicePort()}
             - Stat Service URL: ${getStatServiceURL()}
+            - Model Store Base URL: ${getModelStoreBaseUrl().ifBlank { "(use Foreman IP)" }}
+            - Working Directory: ${getWorkingDir().ifBlank { "(not set)" }}
             - Is Configured: ${isForemanConfigured()}
         """.trimIndent()
     }
