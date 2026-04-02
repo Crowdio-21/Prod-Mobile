@@ -52,6 +52,8 @@ class DeviceInfoCollector(private val context: Context) {
                     batteryLevel = metrics.batteryInfo.level.toFloat(),
                     isCharging = metrics.batteryInfo.isCharging,
                     networkType = getNetworkTypeName(metrics.networkInfo),
+                    storageTotalGb = (metrics.storageInfo.internalStorage.totalSpace / (1024f * 1024f * 1024f)),
+                    storageAvailableGb = (metrics.storageInfo.internalStorage.availableSpace / (1024f * 1024f * 1024f)),
                     kotlinVersion = KotlinVersion.CURRENT.toString()
                 )
             }.also {
@@ -74,6 +76,8 @@ class DeviceInfoCollector(private val context: Context) {
                 batteryLevel = null,
                 isCharging = null,
                 networkType = null,
+                storageTotalGb = null,
+                storageAvailableGb = null,
                 kotlinVersion = KotlinVersion.CURRENT.toString()
             )
         }
@@ -184,6 +188,8 @@ data class DeviceSpecs(
     val batteryLevel: Float?,
     val isCharging: Boolean?,
     val networkType: String?,
+    val storageTotalGb: Float?,
+    val storageAvailableGb: Float?,
     val kotlinVersion: String = KotlinVersion.CURRENT.toString()
 )
 
@@ -218,6 +224,8 @@ fun DeviceSpecs.toMap(): Map<String, Any?> = mapOf(
     "battery_level" to batteryLevel,
     "is_charging" to isCharging,
     "network_type" to networkType,
+    "storage_total_gb" to storageTotalGb,
+    "storage_available_gb" to storageAvailableGb,
     "kotlin_version" to kotlinVersion
 )
 
