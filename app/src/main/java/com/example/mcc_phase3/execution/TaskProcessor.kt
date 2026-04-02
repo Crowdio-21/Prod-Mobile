@@ -5,10 +5,13 @@ import android.util.Base64
 import android.util.Log
 import com.example.mcc_phase3.communication.ProtocolCodec
 import com.example.mcc_phase3.data.WorkerIdManager
+import com.example.mcc_phase3.communication.DnnStateStore
 import com.example.mcc_phase3.communication.MessageProtocol
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
 import com.example.mcc_phase3.checkpoint.TaskMetadata
+import com.example.mcc_phase3.model.ModelArtifactCache
+import com.example.mcc_phase3.model.ModelArtifactMetadata
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.utils.EventLogger
 import com.example.mcc_phase3.utils.NotificationHelper
@@ -27,6 +30,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * TaskProcessor handles task assignment and routing
@@ -66,6 +70,7 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
     }
     
     private val workerIdManager = WorkerIdManager.getInstance(context)
+    private val dnnStateStore = DnnStateStore(context)
     private val pythonExecutor = PythonExecutor(context)
     private val modelRepository = ModelRepository(context)
     private val configManager = ConfigManager.getInstance(context)
@@ -79,6 +84,11 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
     
     // Checkpoint handler for periodic progress reporting
     private val checkpointHandler = CheckpointHandler(checkpointIntervalMs = 5000L)
+    private val activeTaskSnapshotStore = ActiveTaskSnapshotStore(context)
+    private val modelArtifactCache = ModelArtifactCache(context)
+    private val modelArtifactRegistry = ConcurrentHashMap<String, ModelArtifactMetadata>()
+    private val tflitePartitionExecutor = TFLitePartitionExecutor()
+    private val onnxPartitionExecutor = OnnxPartitionExecutor()
     private val processorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     // Callback for sending checkpoint messages via WebSocket
@@ -355,7 +365,11 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
                 val jsonMessage = JSONObject(message)
                 val messageType = jsonMessage.optString("type", "")
                 val data = jsonMessage.optJSONObject("data")
-                val jobId = jsonMessage.optString("job_id", null)
+                val jobId = if (jsonMessage.has("job_id") && !jsonMessage.isNull("job_id")) {
+                    jsonMessage.optString("job_id")
+                } else {
+                    null
+                }
                 
                 when (messageType) {
                     MessageProtocol.MessageType.ASSIGN_TASK -> processTaskAssignment(data, jobId)
@@ -424,6 +438,8 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             // Parse task_metadata if present (declarative checkpointing configuration)
             val taskMetadataJson = data?.optJSONObject("task_metadata")
             val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
+            val executionContext = parseExecutionContext(data, taskMetadataJson)
+            var modelPartitionId = executionContext.modelPartitionId
             
             if (taskMetadataJson != null) {
                 Log.d(TAG, "Task metadata: checkpoint_enabled=${taskMetadata.checkpointEnabled}, " +
@@ -431,7 +447,9 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
                         "vars=${taskMetadata.checkpointState}")
             }
             
-            if (funcCode.isEmpty()) {
+            val isNativeExecution = isNativeExecutionMode(executionContext.executionMode)
+
+            if (funcCode.isEmpty() && !isNativeExecution) {
                 return createErrorResponse("No function code found in task")
             }
 
@@ -512,6 +530,15 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             currentJobId.set(jobId)
             isTaskRunning.set(true)
             taskStartTime.set(System.currentTimeMillis())
+            activeTaskSnapshotStore.save(
+                ActiveTaskSnapshot(
+                    taskId = taskId,
+                    jobId = jobId,
+                    modelPartitionId = modelPartitionId.ifBlank { null },
+                    startedAtEpochMs = taskStartTime.get() ?: System.currentTimeMillis(),
+                    isResume = false
+                )
+            )
             currentProgress.set(0f)
             lastKnownProgress.set(0f)
             pausedAtTime.set(null)
@@ -528,6 +555,8 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
                 pythonExecutor.setProgressCallback { progress ->
                     updateProgress(progress)
                 }
+
+                pythonExecutor.setCurrentModelPartitionContext(modelMetadata)
 
                 // Watchdog: cancel this coroutine if the task exceeds TASK_TIMEOUT_MS
                 taskTimeoutJob = processorScope.launch {
@@ -637,18 +666,21 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
                 checkpointHandler.stopCheckpointMonitoring()
                 pythonExecutor.setCheckpointHandler(null)
                 pythonExecutor.setProgressCallback(null)
+                pythonExecutor.setCurrentModelPartitionContext(null)
                 Log.i(TAG, " Checkpoint monitoring stopped for task $taskId (sent ${checkpointHandler.getCheckpointCount()} checkpoints)")
                 
                 // Clear current task, job and work type
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
+                activeTaskSnapshotStore.clear()
                 taskStartTime.set(null)
                 currentProgress.set(0f)
                 lastKnownProgress.set(0f)
                 pausedAtTime.set(null)
                 totalPausedMs.set(0L)
                 currentWorkType.set("Other")
+                dnnStateStore.clearFallbackModeForTask(taskId)
             }
             
         } catch (e: Exception) {
@@ -658,12 +690,14 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
+            activeTaskSnapshotStore.clear()
             taskStartTime.set(null)
             currentProgress.set(0f)
             lastKnownProgress.set(0f)
             pausedAtTime.set(null)
             totalPausedMs.set(0L)
             currentWorkType.set("Other")
+            dnnStateStore.clearFallbackModeForTask(taskId)
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -1253,11 +1287,31 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             // Parse task_metadata if present (declarative checkpointing configuration)
             val taskMetadataJson = data.optJSONObject("task_metadata")
             val taskMetadata = TaskMetadata.fromJson(taskMetadataJson)
+            val executionContext = parseExecutionContext(data, taskMetadataJson)
+            var modelPartitionId = executionContext.modelPartitionId
+            if (modelPartitionId.isBlank()) {
+                modelPartitionId = inferSingleCachedPartitionId()
+            }
+            val modelMetadata = if (modelPartitionId.isNotBlank()) {
+                modelArtifactRegistry[modelPartitionId] ?: modelArtifactCache.getArtifact(modelPartitionId)
+            } else {
+                null
+            }
             
             if (taskMetadataJson != null) {
                 Log.d(TAG, "Task metadata: checkpoint_enabled=${taskMetadata.checkpointEnabled}, " +
                         "interval=${taskMetadata.checkpointInterval}s, " +
                         "vars=${taskMetadata.checkpointState}")
+            }
+
+            val isNativeExecution = isNativeExecutionMode(executionContext.executionMode)
+
+            if (funcCode.isEmpty() && !isNativeExecution) {
+                return createErrorResponse("No function code found in resume task")
+            }
+
+            if (isNativeExecution && modelMetadata == null) {
+                return createErrorResponse("No model metadata found for native model resume")
             }
             
             // Get checkpoint_state as JSON object (new format)
@@ -1296,10 +1350,6 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             // Also support legacy format with reconstructed_state_hex
             val reconstructedStateHex = data.optString("reconstructed_state_hex", "")
             
-            if (funcCode.isEmpty()) {
-                return createErrorResponse("No function code found in resume task")
-            }
-            
             if (taskArgsJson == "[]") {
                 Log.w(TAG, "No args found in resume_task message - foreman should include original args (checked both 'task_args' and 'args' fields)")
             } else {
@@ -1307,7 +1357,7 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             }
             
             // Determine checkpoint state JSON
-            val checkpointStateJson: String = when {
+            val checkpointStateJson: String? = when {
                 checkpointStateObj != null -> {
                     // New format: checkpoint_state is already decoded JSON
                     Log.d(TAG, "Using new checkpoint_state format")
@@ -1320,9 +1370,11 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
                     val decompressedState = decompressGzip(reconstructedStateBytes)
                     String(decompressedState, Charsets.UTF_8)
                 }
-                else -> {
-                    return createErrorResponse("No checkpoint state found in resume task")
-                }
+                else -> null
+            }
+
+            if (!isNativeExecution && checkpointStateJson == null) {
+                return createErrorResponse("No checkpoint state found in resume task")
             }
             
             // Extract progress from checkpoint state for logging
@@ -1339,8 +1391,18 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             currentTaskId.set(taskId)
             currentJobId.set(jobId)
             isTaskRunning.set(true)
+            activeTaskSnapshotStore.save(
+                ActiveTaskSnapshot(
+                    taskId = taskId,
+                    jobId = jobId,
+                    modelPartitionId = modelPartitionId.ifBlank { null },
+                    startedAtEpochMs = System.currentTimeMillis(),
+                    isResume = true
+                )
+            )
             
             try {
+                pythonExecutor.setCurrentModelPartitionContext(modelMetadata)
                 // Start checkpoint monitoring (continuing from where we left off)
                 checkpointCallback?.let { callback ->
                     // Configure checkpoint handler from task_metadata if present
@@ -1369,14 +1431,23 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
                     }
                 }
                 
-                // Execute with restored state
-                // - checkpointStateJson: sets up builtins._checkpoint_state with _is_resumed=True
-                // - taskArgsJson: the original function arguments
-                val executionResult = pythonExecutor.executeCodeWithRestoredState(
-                    funcCode = funcCode, 
-                    checkpointStateJson = checkpointStateJson,
-                    taskArgsJson = taskArgsJson
-                )
+                val executionResult = if (isNativeExecution && modelMetadata != null) {
+                    runNativeModelExecution(
+                        taskId = taskId,
+                        modelMetadata = modelMetadata,
+                        taskArgsJson = taskArgsJson,
+                        executionMode = executionContext.executionMode
+                    )
+                } else {
+                    // Execute with restored state
+                    // - checkpointStateJson: sets up builtins._checkpoint_state with _is_resumed=True
+                    // - taskArgsJson: the original function arguments
+                    pythonExecutor.executeCodeWithRestoredState(
+                        funcCode = funcCode,
+                        checkpointStateJson = checkpointStateJson ?: "{}",
+                        taskArgsJson = taskArgsJson
+                    )
+                }
                 
                 // Create response with recovery_status for resumed tasks
                 val response = MessageProtocol.createTaskResultMessageWithRecoveryStatus(
@@ -1394,12 +1465,14 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
                 // Stop checkpoint monitoring
                 checkpointHandler.stopCheckpointMonitoring()
                 pythonExecutor.setCheckpointHandler(null)
+                pythonExecutor.setCurrentModelPartitionContext(null)
                 Log.i(TAG, "🛑 Checkpoint monitoring stopped for resumed task $taskId")
                 
                 // Clear current task and job
                 currentTaskId.set(null)
                 currentJobId.set(null)
                 isTaskRunning.set(false)
+                activeTaskSnapshotStore.clear()
             }
             
         } catch (e: Exception) {
@@ -1407,6 +1480,7 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             currentTaskId.set(null)
             currentJobId.set(null)
             isTaskRunning.set(false)
+            activeTaskSnapshotStore.clear()
             MessageProtocol.createTaskErrorMessage(
                 taskId = taskId,
                 jobId = jobId,
@@ -1433,6 +1507,184 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             null
         }
     }
+
+    fun registerModelArtifact(metadata: ModelArtifactMetadata) {
+        if (metadata.modelPartitionId.isBlank()) {
+            return
+        }
+        modelArtifactRegistry[metadata.modelPartitionId] = metadata
+        Log.i(TAG, "Registered model partition metadata for ${metadata.modelPartitionId}")
+    }
+
+    fun unregisterModelArtifact(modelPartitionId: String) {
+        if (modelPartitionId.isBlank()) {
+            return
+        }
+
+        val removed = modelArtifactRegistry.remove(modelPartitionId)
+        if (removed != null) {
+            // Close any cached OrtSession for this model file
+            onnxPartitionExecutor.closeSession(removed.localPath)
+            Log.i(TAG, "Unregistered model partition metadata for $modelPartitionId")
+        }
+    }
+
+    fun getPendingRecoverySnapshot(): ActiveTaskSnapshot? {
+        if (isTaskRunning.get()) {
+            return null
+        }
+        return activeTaskSnapshotStore.load()
+    }
+
+    fun clearPendingRecoverySnapshot() {
+        activeTaskSnapshotStore.clear()
+    }
+
+    fun onDeviceTopology(data: JSONObject) {
+        dnnStateStore.onDeviceTopology(data)
+    }
+
+    fun onTopologyUpdate(data: JSONObject) {
+        // Duplicate filtering is handled by WorkerWebSocketClient.
+        dnnStateStore.onDeviceTopology(data)
+    }
+
+    fun onAggregationConfig(data: JSONObject) {
+        dnnStateStore.onAggregationConfig(data)
+    }
+
+    fun onFallbackDecision(data: JSONObject) {
+        dnnStateStore.isDuplicateFallbackDecision(data)
+    }
+
+    private fun normalizeFallbackMode(mode: String?): String? {
+        val normalized = mode?.trim()?.lowercase()
+        return if (normalized.isNullOrBlank()) null else normalized
+    }
+
+    private fun isStandaloneFallbackMode(mode: String?): Boolean {
+        if (mode.isNullOrBlank()) {
+            return false
+        }
+
+        return mode.contains("standalone") || mode.contains("local")
+    }
+
+    private fun inferSingleCachedPartitionId(): String {
+        val registered = modelArtifactRegistry.keys.toList()
+        if (registered.size == 1) {
+            return registered.first()
+        }
+
+        val cached = modelArtifactCache.allArtifacts()
+        return if (cached.size == 1) cached.first().modelPartitionId else ""
+    }
+
+    private fun parseExecutionContext(
+        data: JSONObject,
+        taskMetadataJson: JSONObject?
+    ): ExecutionContext {
+        val executionMetadata = data.optJSONObject("execution_metadata")
+
+        val executionMode = firstNonBlank(
+            data.optString("execution_mode", ""),
+            executionMetadata?.optString("execution_mode", "") ?: "",
+            taskMetadataJson?.optString("execution_mode", "") ?: ""
+        )?.lowercase()
+
+        val modelPartitionId = firstNonBlank(
+            data.optString("model_partition_id", ""),
+            executionMetadata?.optString("model_partition_id", "") ?: "",
+            taskMetadataJson?.optString("model_partition_id", "") ?: ""
+        ).orEmpty()
+
+        return ExecutionContext(
+            executionMode = executionMode,
+            modelPartitionId = modelPartitionId
+        )
+    }
+
+    private fun isNativeExecutionMode(executionMode: String?): Boolean {
+        val mode = executionMode?.trim()?.lowercase() ?: return false
+        return mode == "native_model" || mode == "onnx" || mode == "onnx_model" || mode == "tflite" || mode == "tflite_model"
+    }
+
+    private fun resolveNativeRuntime(executionMode: String?, modelMetadata: ModelArtifactMetadata): String {
+        val mode = executionMode?.trim()?.lowercase()
+        if (mode == "onnx" || mode == "onnx_model") {
+            return "onnx"
+        }
+        if (mode == "tflite" || mode == "tflite_model") {
+            return "tflite"
+        }
+
+        val metadataRuntime = modelMetadata.modelRuntime.trim().lowercase()
+        if (metadataRuntime == "onnx" || metadataRuntime == "tflite") {
+            return metadataRuntime
+        }
+
+        return if (mode == "native_model") "onnx" else "unknown"
+    }
+
+    private fun runNativeModelExecution(
+        taskId: String,
+        modelMetadata: ModelArtifactMetadata,
+        taskArgsJson: String,
+        executionMode: String?
+    ): Map<String, Any> {
+        val modelPath = modelMetadata.localPath
+        if (modelPath.isBlank()) {
+            return mapOf(
+                "status" to "error",
+                "message" to "Model metadata/path missing for native model execution",
+                "result" to "{}"
+            )
+        }
+
+        val runtime = resolveNativeRuntime(executionMode, modelMetadata)
+
+        return try {
+            val nativeResult = when (runtime) {
+                "onnx" -> onnxPartitionExecutor.execute(
+                    modelPath = modelPath,
+                    taskArgsJson = taskArgsJson
+                )
+                "tflite" -> tflitePartitionExecutor.execute(
+                    modelPath = modelPath,
+                    taskArgsJson = taskArgsJson
+                )
+                else -> throw IllegalStateException("Unsupported native runtime '$runtime' for task $taskId")
+            }
+
+            mapOf(
+                "status" to "success",
+                "message" to "${runtime.uppercase()} partition executed",
+                "result" to nativeResult.toString()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Native model execution failed for task $taskId with runtime=$runtime", e)
+            mapOf(
+                "status" to "error",
+                "message" to "Native model execution failed: ${e.message}",
+                "result" to "{}"
+            )
+        }
+    }
+
+    private fun firstNonBlank(vararg values: String): String? {
+        for (value in values) {
+            val trimmed = value.trim()
+            if (trimmed.isNotBlank()) {
+                return trimmed
+            }
+        }
+        return null
+    }
+
+    private data class ExecutionContext(
+        val executionMode: String?,
+        val modelPartitionId: String
+    )
     
     /**
      * Convert hex string to byte array
@@ -1694,28 +1946,60 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             Log.d(TAG, "Using time-based fallback progress: $progressPercent% (elapsed: ${elapsedMs}ms)")
         }
 
-        // When paused and no live source reported a value, return the cached progress
-        if (isTaskPaused.get() && progressPercent <= 0f) {
-            progressPercent = lastKnownProgress.get()
-        }
+            // Get progress from multiple sources (priority order)
+            var progressPercent = currentProgress.get()  // 1. Real-time progress from Python callback
 
-        // Cache the latest non-zero progress so we can show it while paused
-        if (progressPercent > 0f) {
-            lastKnownProgress.set(progressPercent)
+            // 2. Fallback to checkpoint progress if no real-time updates
+            if (progressPercent <= 0f) {
+                val currentCheckpointState = checkpointHandler.currentState.value
+                progressPercent = currentCheckpointState?.progressPercent ?: 0f
+            }
+
+            // 3. Fallback to time-based progress if no other source
+            //    Skip when paused – the task isn't making progress, so the bar should freeze.
+            if (progressPercent <= 0f && isBusy && !isTaskPaused.get() && startTime != null) {
+                val elapsedMs = System.currentTimeMillis() - startTime - totalPausedMs.get()
+                // Simulate progress: 0-99% spread evenly across the full task timeout window.
+                progressPercent = ((elapsedMs / TASK_TIMEOUT_MS.toFloat()) * 99f).coerceIn(0f, 99f)
+                Log.d(TAG, "Using time-based fallback progress: $progressPercent% (elapsed: ${elapsedMs}ms)")
+            }
+
+            // When paused and no live source reported a value, return the cached progress
+            if (isTaskPaused.get() && progressPercent <= 0f) {
+                progressPercent = lastKnownProgress.get()
+            }
+
+            // Cache the latest non-zero progress so we can show it while paused
+            if (progressPercent > 0f) {
+                lastKnownProgress.set(progressPercent)
+            }
+
+            Log.d(TAG, "getCurrentTaskStatus - busy: $isBusy, taskId: $taskId, progress: $progressPercent%")
+
+            mapOf<String, Any>(
+                "is_busy" to isBusy,
+                "is_paused" to isTaskPaused.get(),
+                "current_task_id" to taskId,
+                "current_job_id" to jobId,
+                "python_ready" to pythonExecutor.isReady(),
+                "processor_initialized" to isInitialized.get(),
+                "progress_percent" to progressPercent,
+                "work_type" to currentWorkType.get()
+            )
+        } catch (oom: OutOfMemoryError) {
+            Log.e(TAG, "OOM while building task status snapshot", oom)
+            System.gc()
+            mapOf<String, Any>(
+                "is_busy" to isTaskRunning.get(),
+                "is_paused" to isTaskPaused.get(),
+                "current_task_id" to (currentTaskId.get() ?: ""),
+                "current_job_id" to (currentJobId.get() ?: ""),
+                "python_ready" to false,
+                "processor_initialized" to isInitialized.get(),
+                "progress_percent" to 0.0,
+                "work_type" to currentWorkType.get()
+            )
         }
-        
-        Log.d(TAG, "getCurrentTaskStatus - busy: $isBusy, taskId: $taskId, progress: $progressPercent%")
-        
-        return mapOf<String, Any>(
-            "is_busy" to isBusy,
-            "is_paused" to isTaskPaused.get(),
-            "current_task_id" to taskId,
-            "current_job_id" to jobId,
-            "python_ready" to pythonExecutor.isReady(),
-            "processor_initialized" to isInitialized.get(),
-            "progress_percent" to progressPercent,
-            "work_type" to currentWorkType.get()
-        )
     }
     
     /**
@@ -1872,6 +2156,7 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
             currentTaskId.set(null)
             isTaskRunning.set(false)
             isTaskPaused.set(false)
+            activeTaskSnapshotStore.clear()
             lastKnownProgress.set(0f)
             pausedAtTime.set(null)
             totalPausedMs.set(0L)

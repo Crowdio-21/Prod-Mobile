@@ -15,6 +15,14 @@ object MessageProtocol {
         const val ASSIGN_TASK = "assign_task"
         const val TASK_RESULT = "task_result"
         const val TASK_ERROR = "task_error"
+        const val LOAD_MODEL = "load_model"
+        const val UNLOAD_MODEL = "unload_model"
+        const val MODEL_LOADED = "model_loaded"
+        const val DEVICE_TOPOLOGY = "device_topology"
+        const val TOPOLOGY_UPDATE = "topology_update"
+        const val INTERMEDIATE_FEATURE = "intermediate_feature"
+        const val AGGREGATION_CONFIG = "aggregation_config"
+        const val FALLBACK_DECISION = "fallback_decision"
         const val PING = "ping"
         const val PONG = "pong"
         const val WORKER_HEARTBEAT = "worker_heartbeat"
@@ -43,6 +51,9 @@ object MessageProtocol {
             put("type", MessageType.WORKER_READY)
             put("data", JSONObject().apply {
                 put("worker_id", workerId)
+                put("platform", "android")
+                put("runtime", "kotlin")
+                put("model_runtime", "onnx")
                 
                 // CRITICAL: Tell foreman this is an Android/Chaquopy worker
                 // Foreman uses this to instrument code with explicit checkpoint callbacks
@@ -216,6 +227,53 @@ object MessageProtocol {
             put("timestamp", System.currentTimeMillis())
         }.toString()
     }
+
+    /**
+     * Create MODEL_LOADED acknowledgment after successful model download + cache.
+     * Foreman uses this ack to gate stage task dispatch for DNN pipeline jobs.
+     */
+    fun createModelLoadedMessage(
+        workerId: String,
+        jobId: String?,
+        modelVersionId: String,
+        modelPartitionId: String
+    ): String {
+        return JSONObject().apply {
+            put("type", MessageType.MODEL_LOADED)
+            put("data", JSONObject().apply {
+                put("worker_id", workerId)
+                put("model_version_id", modelVersionId)
+                put("model_partition_id", modelPartitionId)
+            })
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
+        }.toString()
+    }
+
+    /**
+     * Create INTERMEDIATE_FEATURE message for DNN feature routing.
+     */
+    fun createIntermediateFeatureMessage(
+        jobId: String?,
+        taskId: String,
+        sourceWorkerId: String,
+        targetTaskId: String,
+        payload: Any,
+        payloadFormat: String = "json"
+    ): String {
+        return JSONObject().apply {
+            put("type", MessageType.INTERMEDIATE_FEATURE)
+            put("data", JSONObject().apply {
+                put("task_id", taskId)
+                put("source_worker_id", sourceWorkerId)
+                put("target_task_id", targetTaskId)
+                put("payload", payload)
+                put("payload_format", payloadFormat)
+            })
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
+        }.toString()
+    }
     
     /**
      * Create a heartbeat message with performance metrics
@@ -240,9 +298,14 @@ object MessageProtocol {
                     val collector = DeviceInfoCollector(it)
                     val metrics = collector.getPerformanceMetrics()
                     val metricsMap = metrics.toMap()
+                    val performanceMetrics = JSONObject()
                     metricsMap.forEach { (key, value) ->
                         put(key, value)
+                        performanceMetrics.put(key, value)
                     }
+
+                    // Backward-compatible nested metrics payload for foreman handlers.
+                    put("performance_metrics", performanceMetrics)
                 }
             })
             
@@ -268,9 +331,12 @@ object MessageProtocol {
                     val collector = DeviceInfoCollector(it)
                     val metrics = collector.getPerformanceMetrics()
                     val metricsMap = metrics.toMap()
+                    val performanceMetrics = JSONObject()
                     metricsMap.forEach { (key, value) ->
                         put(key, value)
+                        performanceMetrics.put(key, value)
                     }
+                    put("performance_metrics", performanceMetrics)
                 }
             })
             put("timestamp", System.currentTimeMillis())

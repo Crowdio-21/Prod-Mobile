@@ -3,6 +3,20 @@ package com.example.mcc_phase3.communication
 import android.content.Context
 import android.util.Log
 import com.example.mcc_phase3.checkpoint.CheckpointMessage
+import com.example.mcc_phase3.checkpoint.LocalCheckpointStore
+import com.example.mcc_phase3.model.ModelArtifactCache
+import com.example.mcc_phase3.model.ModelDownloadClient
+import com.example.mcc_phase3.utils.EventLogger
+import com.example.mcc_phase3.utils.NotificationHelper
+import kotlinx.coroutines.*
+import org.java_websocket.client.WebSocketClient
+import org.java_websocket.handshake.ServerHandshake
+import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import org.json.JSONArray
+import org.json.JSONObject
 import com.example.mcc_phase3.checkpoint.CheckpointStateHolder
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.data.WorkerIdManager
@@ -60,6 +74,14 @@ class WorkerWebSocketClient(
     )
 
     private val workerIdManager = WorkerIdManager.getInstance(context)
+    private val dnnStateStore = DnnStateStore(context)
+    private val modelArtifactCache = ModelArtifactCache(context)
+    private val modelDownloadClient = ModelDownloadClient()
+    private val outboundQueueStore = OutboundMessageQueueStore(context)
+    private val localCheckpointStore = LocalCheckpointStore(context)
+    private val pendingIntermediateFeatures = ConcurrentHashMap<String, MutableList<JSONObject>>()
+    
+    private var webSocket: WebSocketClient? = null
     private val configManager = ConfigManager.getInstance(context)
     private val checkpointStateHolder = CheckpointStateHolder()
     private val clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())

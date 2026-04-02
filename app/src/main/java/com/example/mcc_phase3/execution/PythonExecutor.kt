@@ -10,6 +10,7 @@ import com.chaquo.python.android.AndroidPlatform
 import com.example.mcc_phase3.data.WorkerIdManager
 import com.example.mcc_phase3.data.ConfigManager
 import com.example.mcc_phase3.checkpoint.CheckpointHandler
+import com.example.mcc_phase3.model.ModelArtifactMetadata
 import com.example.mcc_phase3.utils.EventLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -79,6 +80,36 @@ class PythonExecutor(private val context: Context) {
     fun setProgressCallback(callback: ((Float) -> Unit)?) {
         progressCallback = callback
         Log.d(TAG, "Progress callback ${if (callback != null) "set" else "cleared"}")
+    }
+
+    /**
+     * Injects model partition metadata into Python builtins for partition-aware execution.
+     */
+    fun setCurrentModelPartitionContext(metadata: ModelArtifactMetadata?) {
+        try {
+            if (!isInitialized.get()) {
+                return
+            }
+
+            if (metadata == null) {
+                builtinsModule?.put("_crowdio_model_partition", null)
+                return
+            }
+
+            val json = JSONObject().apply {
+                put("model_version_id", metadata.modelVersionId)
+                put("model_partition_id", metadata.modelPartitionId)
+                put("checksum", metadata.checksumSha256Hex)
+                put("local_path", metadata.localPath)
+                put("loaded_at", metadata.loadedAtEpochMs)
+            }
+
+            val pythonObj = jsonModule?.callAttr("loads", json.toString())
+            builtinsModule?.put("_crowdio_model_partition", pythonObj)
+            Log.d(TAG, "Set _crowdio_model_partition for ${metadata.modelPartitionId}")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set model partition context: ${e.message}")
+        }
     }
     
     /**

@@ -97,6 +97,8 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
+    // ONNX Runtime for native ONNX partition inference
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
     // Ktor for D2D tensor transfer (TCP sockets)
     implementation("io.ktor:ktor-network:2.3.7")
 
