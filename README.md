@@ -14,6 +14,9 @@ A modern Android application that serves as both a monitoring client and a distr
 - **Activity Monitoring**: Horizontal loading lines showing task execution progress
 - **Worker Management**: Start/stop mobile worker services
 - **Network Resilience**: Circuit breaker pattern with automatic retries
+- **ONNX Session Caching**: OrtSessions are cached per model path — consecutive inferences on the same partition skip expensive session creation
+- **Model Cache Reporting**: WORKER_READY message includes cached model partition IDs so the foreman can skip unnecessary re-downloads
+- **from_cache Model Loading**: When foreman sends LOAD_MODEL with from_cache=true, the worker re-registers from disk cache without downloading
 
 ### 🎨 Modern UI/UX
 - **Material Design 3**: Latest Android design language
@@ -229,6 +232,16 @@ Foreman → PyTorch Code → Android Worker
 ```
 
 ### **Mobile Optimization**
+
+#### **ONNX Session Caching**
+OrtSession objects are now cached per model file path in `OnnxPartitionExecutor`. This eliminates the
+expensive session-creation overhead for back-to-back inferences on the same model partition. Sessions
+are automatically closed when the model is unloaded via UNLOAD_MODEL or when the worker shuts down.
+
+#### **from_cache Model Loading**
+When the foreman sends a LOAD_MODEL message with `from_cache=true`, the mobile worker looks up the
+model in its on-disk `ModelArtifactCache` and re-registers it without downloading. If the cache
+lookup fails, it falls through to the normal HTTP download path.
 
 #### **Why TextBlob Instead of PyTorch?**
 - **Size**: 1KB vs 250MB+ (PyTorch model)
