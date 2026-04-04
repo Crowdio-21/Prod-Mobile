@@ -7,31 +7,31 @@
 
     <fragment
         android:id="@+id/navigation_dashboard"
-        android:name="com.example.mcc_phase3.ui.fragments.DashboardFragment"
+        android:name="com.crowdio.mcc_phase3.ui.fragments.DashboardFragment"
         android:label="@string/title_dashboard"
         tools:layout="@layout/fragment_dashboard" />
 
     <fragment
         android:id="@+id/navigation_jobs"
-        android:name="com.example.mcc_phase3.ui.fragments.JobsFragment"
+        android:name="com.crowdio.mcc_phase3.ui.fragments.JobsFragment"
         android:label="@string/title_jobs"
         tools:layout="@layout/fragment_jobs" />
 
     <fragment
         android:id="@+id/navigation_workers"
-        android:name="com.example.mcc_phase3.ui.fragments.WorkersFragment"
+        android:name="com.crowdio.mcc_phase3.ui.fragments.WorkersFragment"
         android:label="@string/title_workers"
         tools:layout="@layout/fragment_workers" />
 
     <fragment
         android:id="@+id/navigation_activity"
-        android:name="com.example.mcc_phase3.ui.fragments.ActivityFragment"
+        android:name="com.crowdio.mcc_phase3.ui.fragments.ActivityFragment"
         android:label="@string/title_activity"
         tools:layout="@layout/fragment_activity" />
 
     <fragment
         android:id="@+id/navigation_worker_control"
-        android:name="com.example.mcc_phase3.ui.fragments.WorkerControlFragment"
+        android:name="com.crowdio.mcc_phase3.ui.fragments.WorkerControlFragment"
         android:label="@string/title_worker_control"
         tools:layout="@layout/fragment_worker_control" />
 
