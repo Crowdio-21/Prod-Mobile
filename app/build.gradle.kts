@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.mcc_phase3"
+    namespace = "com.crowdio.mcc_phase3"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.mcc_phase3"
+        applicationId = "com.crowdio.mcc_phase3"
         minSdk = 27
         targetSdk = 36
         versionCode = 1
@@ -64,6 +64,7 @@ android {
                 install("requests")
                 install("aiohttp")
                 install("Pillow")
+                install("opencv-python-headless")
                 install("tflite-runtime")
 
             }
@@ -97,10 +98,11 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
-    // ONNX Runtime for native ONNX partition inference
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
     // Ktor for D2D tensor transfer (TCP sockets)
     implementation("io.ktor:ktor-network:2.3.7")
+
+    // ONNX Runtime for executing ONNX partitions on Android
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
