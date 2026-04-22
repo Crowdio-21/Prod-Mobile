@@ -1862,6 +1862,20 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
     }
 
     /**
+     * Kill (cancel) the currently running task.
+     * Implements TaskExecutor.killTask — validates the task ID before signalling.
+     */
+    override fun killTask(taskId: String) {
+        val current = currentTaskId.get()
+        if (current != null && current == taskId && isTaskRunning.get()) {
+            Log.d(TAG, "⛔ killTask($taskId) — delegating to killCurrentTask()")
+            killCurrentTask()
+        } else {
+            Log.w(TAG, "killTask($taskId) ignored — current=$current running=${isTaskRunning.get()}")
+        }
+    }
+
+    /**
      * Cleanup resources
      */
     override fun cleanup() {
