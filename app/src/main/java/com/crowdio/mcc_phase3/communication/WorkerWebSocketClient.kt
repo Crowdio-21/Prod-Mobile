@@ -422,9 +422,20 @@ class WorkerWebSocketClient(
     }
 
     private fun sendTaskResult(taskId: String, jobId: String?, result: TaskExecutionResult): Boolean {
-        // Intercept kill acknowledgement — return KILL_ACK instead of TASK_RESULT
+        // Intercept kill acknowledgement — return KILL_ACK instead of TASK_RESULT.
+        // resultValue may be a plain String "killed" OR a JSONObject {"result":"killed"}
+        // depending on how normalizeAndValidateResult wraps the value.
         val resultValue = result.result
-        if (resultValue is String && (resultValue == "killed" || resultValue == "'killed'")) {
+        val killedCheck = when {
+            resultValue is String ->
+                resultValue == "killed" || resultValue == "'killed'"
+            resultValue is org.json.JSONObject -> {
+                val inner = resultValue.optString("result", "")
+                inner == "killed" || inner == "'killed'"
+            }
+            else -> false
+        }
+        if (killedCheck) {
             Log.d(TAG, "⛔ Task $taskId was killed, sending KILL_ACK")
             return sendKillAck(taskId, jobId)
         }
