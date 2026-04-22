@@ -18,6 +18,8 @@ object MessageType {
     const val WORKER_HEARTBEAT = "worker_heartbeat"
     const val WORKER_STATUS = "worker_status"
     const val CHECKPOINT_ACK = "checkpoint_ack"
+    const val KILL_TASK = "kill_task"
+    const val KILL_ACK = "kill_ack"
 }
 
 data class InboundMessage(

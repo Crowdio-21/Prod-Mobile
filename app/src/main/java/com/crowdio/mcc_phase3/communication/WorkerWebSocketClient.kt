@@ -277,6 +277,7 @@ class WorkerWebSocketClient(
             MessageType.RESUME_TASK -> handleResumeTask(inboundMessage)
             MessageType.PING -> handlePing()
             MessageType.CHECKPOINT_ACK -> handleCheckpointAck(inboundMessage)
+            MessageType.KILL_TASK -> handleKillTask(inboundMessage)
             else -> Log.w(TAG, "Unhandled message type: ${inboundMessage.type}")
         }
     }
@@ -371,6 +372,16 @@ class WorkerWebSocketClient(
         Log.d(TAG, "Checkpoint $checkpointId acknowledged for task $taskId")
     }
 
+    private fun handleKillTask(message: InboundMessage) {
+        val taskId = message.data?.optString("task_id").orEmpty()
+        if (taskId.isBlank()) {
+            Log.w(TAG, "KILL_TASK received without task_id, ignoring")
+            return
+        }
+        Log.d(TAG, "⛔ Received KILL_TASK for task: $taskId")
+        taskExecutor.killTask(taskId)
+    }
+
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = clientScope.launch {
@@ -411,6 +422,24 @@ class WorkerWebSocketClient(
     }
 
     private fun sendTaskResult(taskId: String, jobId: String?, result: TaskExecutionResult): Boolean {
+        // Intercept kill acknowledgement — return KILL_ACK instead of TASK_RESULT.
+        // resultValue may be a plain String "killed" OR a JSONObject {"result":"killed"}
+        // depending on how normalizeAndValidateResult wraps the value.
+        val resultValue = result.result
+        val killedCheck = when {
+            resultValue is String ->
+                resultValue == "killed" || resultValue == "'killed'"
+            resultValue is org.json.JSONObject -> {
+                val inner = resultValue.optString("result", "")
+                inner == "killed" || inner == "'killed'"
+            }
+            else -> false
+        }
+        if (killedCheck) {
+            Log.d(TAG, "⛔ Task $taskId was killed, sending KILL_ACK")
+            return sendKillAck(taskId, jobId)
+        }
+
         val payload = JSONObject().apply {
             put("type", MessageType.TASK_RESULT)
             put("job_id", jobId)
@@ -444,6 +473,23 @@ class WorkerWebSocketClient(
         val sent = sendMessage(payload)
         if (sent) {
             checkpointStateHolder.clear()
+        }
+        return sent
+    }
+
+    private fun sendKillAck(taskId: String, jobId: String?): Boolean {
+        val payload = JSONObject().apply {
+            put("type", MessageType.KILL_ACK)
+            put("job_id", jobId)
+            put("timestamp", System.currentTimeMillis())
+            put("data", JSONObject().apply {
+                put("task_id", taskId)
+            })
+        }.toString()
+        val sent = sendMessage(payload)
+        if (sent) {
+            checkpointStateHolder.clear()
+            Log.d(TAG, "⛔ KILL_ACK sent for task $taskId")
         }
         return sent
     }

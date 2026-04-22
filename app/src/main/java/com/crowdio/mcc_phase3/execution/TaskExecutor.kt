@@ -34,5 +34,7 @@ interface TaskExecutor {
 
     fun getCurrentTaskStatus(): Map<String, Any>
 
+    fun killTask(taskId: String)
+
     fun cleanup()
 }
