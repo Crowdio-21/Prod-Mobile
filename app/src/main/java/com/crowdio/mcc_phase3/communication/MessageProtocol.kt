@@ -15,6 +15,8 @@ object MessageProtocol {
         const val ASSIGN_TASK = "assign_task"
         const val TASK_RESULT = "task_result"
         const val TASK_ERROR = "task_error"
+        const val KILL_TASK = "kill_task"
+        const val KILL_ACK = "kill_ack"
         const val PING = "ping"
         const val PONG = "pong"
         const val WORKER_HEARTBEAT = "worker_heartbeat"
@@ -277,6 +279,21 @@ object MessageProtocol {
         }.toString()
     }
     
+    /**
+     * Create a KILL_ACK message sent by the worker to acknowledge that a task
+     * has been killed (or was never running / pre-cancelled).
+     */
+    fun createKillAckMessage(taskId: String, jobId: String?): String {
+        return JSONObject().apply {
+            put("msg_type", MessageType.KILL_ACK)
+            put("job_id", jobId ?: JSONObject.NULL)
+            put("timestamp", System.currentTimeMillis())
+            put("data", JSONObject().apply {
+                put("task_id", taskId)
+            })
+        }.toString()
+    }
+
     /**
      * Parse incoming message
      * Handles both "type" and "type" fields for backward compatibility

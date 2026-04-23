@@ -34,6 +34,21 @@ interface TaskExecutor {
 
     fun getCurrentTaskStatus(): Map<String, Any>
 
+    /**
+     * Returns true if [taskId] is the task currently being executed
+     * (i.e. Python is running it right now).  Does NOT return true for
+     * tasks that are only queued and waiting.
+     */
+    fun isTaskActive(taskId: String): Boolean
+
+    /**
+     * Pre-cancel a task that has not started executing yet (still in the
+     * internal queue).  If the task is already running, this is a no-op —
+     * use [killTask] instead.  The task will be silently dropped when it
+     * reaches the front of the queue.
+     */
+    fun cancelTask(taskId: String)
+
     fun killTask(taskId: String)
 
     fun cleanup()

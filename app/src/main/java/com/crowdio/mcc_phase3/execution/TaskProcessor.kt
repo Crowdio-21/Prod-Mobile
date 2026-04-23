@@ -111,6 +111,9 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
     private data class QueuedTask(val data: JSONObject, val jobId: String?, val result: CompletableDeferred<String>)
     private val taskQueue = Channel<QueuedTask>(Channel.UNLIMITED)
 
+    /** Task IDs that received KILL_TASK before they started executing. */
+    private val cancelledTaskIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     private data class StageInfo(
         val stageName: String,
         val partitionIdx: Int? = null
@@ -406,7 +409,17 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
      */
     private suspend fun processTaskAssignmentInternal(data: JSONObject?, jobId: String?): String {
         val taskId = data?.optString("task_id", "") ?: ""
-        
+
+        // If the foreman sent KILL_TASK before this task reached the front of
+        // the queue, skip execution entirely and respond with KILL_ACK so the
+        // foreman can free the assignment immediately.  We return a synthetic
+        // "killed" result which the dispatchProcessorResponse → sendTaskResult
+        // → killedCheck pipeline converts into a KILL_ACK message.
+        if (taskId.isNotEmpty() && cancelledTaskIds.remove(taskId)) {
+            Log.d(TAG, "⛔ Task $taskId was pre-cancelled before execution — sending KILL_ACK")
+            return MessageProtocol.createTaskResultMessage(taskId, jobId, "killed")
+        }
+
         return try {
             Log.d(TAG, "Processing task assignment: $taskId")
             
@@ -1873,6 +1886,23 @@ class TaskProcessor(private val context: Context) : TaskExecutor {
         } else {
             Log.w(TAG, "killTask($taskId) ignored — current=$current running=${isTaskRunning.get()}")
         }
+    }
+
+    /**
+     * Returns true only if [taskId] is the task Python is executing *right now*.
+     * Tasks waiting in the queue return false.
+     */
+    override fun isTaskActive(taskId: String): Boolean =
+        isTaskRunning.get() && currentTaskId.get() == taskId
+
+    /**
+     * Pre-cancel a queued task before it starts executing.
+     * When the task eventually reaches the front of the queue, execution will
+     * be skipped and a KILL_ACK will be sent automatically.
+     */
+    override fun cancelTask(taskId: String) {
+        Log.d(TAG, "cancelTask($taskId) — marking for pre-cancel")
+        cancelledTaskIds.add(taskId)
     }
 
     /**

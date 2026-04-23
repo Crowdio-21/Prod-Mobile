@@ -374,12 +374,25 @@ class WorkerWebSocketClient(
 
     private fun handleKillTask(message: InboundMessage) {
         val taskId = message.data?.optString("task_id").orEmpty()
+        val jobId  = message.data?.optString("job_id").takeIf { !it.isNullOrBlank() }
         if (taskId.isBlank()) {
             Log.w(TAG, "KILL_TASK received without task_id, ignoring")
             return
         }
         Log.d(TAG, "⛔ Received KILL_TASK for task: $taskId")
-        taskExecutor.killTask(taskId)
+
+        if (taskExecutor.isTaskActive(taskId)) {
+            // Task is running right now — signal Python to stop; KILL_ACK will
+            // be sent by sendTaskResult when Python returns "killed".
+            taskExecutor.killTask(taskId)
+        } else {
+            // Task is queued (or already gone).  Pre-cancel it so it gets
+            // dropped if/when it starts, and ACK immediately so the foreman
+            // doesn't wait forever.
+            Log.d(TAG, "⛔ Task $taskId not actively running — pre-cancelling and sending KILL_ACK now")
+            taskExecutor.cancelTask(taskId)
+            sendKillAck(taskId, jobId)
+        }
     }
 
     private fun startHeartbeat() {
