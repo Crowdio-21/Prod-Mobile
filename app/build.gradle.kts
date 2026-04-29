@@ -66,7 +66,7 @@ android {
                 install("Pillow")
                 install("opencv-python-headless")
                 install("tflite-runtime")
-
+                install("scikit-learn")
             }
         }
     }
